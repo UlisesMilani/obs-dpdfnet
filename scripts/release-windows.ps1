@@ -250,44 +250,30 @@ $Sha = (Get-FileHash -Algorithm SHA256 -Path $ZipPath).Hash.ToLowerInvariant()
 "$Sha  $ZipName" | Set-Content -Encoding ASCII "$ZipPath.sha256"
 
 # 6. Release notes. Keep reusable install instructions in README.md.
-$Kind = if ($Version -match '-rc\d+$') {
-    "Release candidate"
-} elseif ($IsPreRelease) {
-    "Early pre-release"
-} else {
-    "Release"
-}
 $CleanChangelog = @($Changelog | Where-Object { ![string]::IsNullOrWhiteSpace($_) })
 $ChangelogSection = ""
 if ($CleanChangelog.Count -gt 0) {
     $ChangelogLines = ($CleanChangelog | ForEach-Object {
         $Item = $_.Trim()
         if ($Item.StartsWith("- ")) { $Item } else { "- $Item" }
-    }) -join "`r`n"
+    }) -join "`n"
 
     $ChangelogSection = @"
-
 ## What's Changed
 
 $ChangelogLines
+
 "@
 }
 
 $ReadmeInstallUrl = "https://github.com/$Repo#install-a-release-build"
 $Notes = @"
-$Kind of **obs-dpdfnet**, a native OBS audio filter for local DPDFNet speech enhancement. Audio is processed locally; the plugin makes no network requests at runtime.
 $ChangelogSection
-
 ## Install
 
-See the Windows release install instructions in the README:
-$ReadmeInstallUrl
+Built against **OBS Studio $ObsVersion** and **ONNX Runtime $OnnxRuntimeVersion**.
 
-## Notes
-
-- The downloadable binary is for Windows x64.
-- The binary is **unsigned**; Windows SmartScreen or Defender may warn on first run.
-- Built against **OBS Studio $ObsVersion** and **ONNX Runtime $OnnxRuntimeVersion**.
+Install instructions: $ReadmeInstallUrl
 
 ## Verify your download
 
@@ -296,10 +282,6 @@ SHA-256 of ``$ZipName``:
 ``````
 $Sha
 ``````
-
-## Licensing
-
-Plugin code is **GPL-2.0-or-later**; the corresponding source is this release's tag (``$Tag``). Bundled DPDFNet models are Apache-2.0, ONNX Runtime is MIT, KissFFT is BSD-3-Clause. See ``THIRD_PARTY.md``, ``LICENSES/``, and the bundled ONNX Runtime notices.
 "@
 Set-Content -Encoding ASCII -Path $NotesPath -Value $Notes
 
