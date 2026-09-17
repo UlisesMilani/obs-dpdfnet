@@ -1,0 +1,78 @@
+name: Rework realtime load
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  rework:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Apply realtime load changes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/dpdfnet-filter.cpp")
+          text = path.read_text()
+
+          replacements = [
+              (
+                  """  uint64_t total_p99_ns = 0;\n  uint64_t total_max_ns = 0;\n  std::array<uint64_t, 4> hop_callbacks = {};""",
+                  """  uint64_t total_p99_ns = 0;\n  uint64_t total_max_ns = 0;\n  uint64_t realtime_processing_ns = 0;\n  uint64_t realtime_budget_ns = 0;\n  std::array<uint64_t, 4> hop_callbacks = {};""",
+              ),
+              (
+                  """  void record(uint64_t lock_wait_ns, uint64_t process_ns, uint64_t total_ns,\n              uint64_t deadline_ns, size_t processed_hops) {\n    lock_wait_.record(lock_wait_ns);\n    process_.record(process_ns);\n    total_.record(total_ns);\n    const size_t hop_bucket = std::min<size_t>(processed_hops, 3);\n    process_by_hops_[hop_bucket].record(process_ns);\n    if (deadline_ns && total_ns > deadline_ns)\n      ++missed_deadlines_;\n  }""",
+                  """  void record(uint64_t lock_wait_ns, uint64_t process_ns, uint64_t total_ns,\n              uint64_t deadline_ns, size_t processed_hops,\n              uint64_t realtime_processing_ns, uint64_t realtime_budget_ns) {\n    lock_wait_.record(lock_wait_ns);\n    process_.record(process_ns);\n    total_.record(total_ns);\n    const size_t hop_bucket = std::min<size_t>(processed_hops, 3);\n    process_by_hops_[hop_bucket].record(process_ns);\n    if (deadline_ns && total_ns > deadline_ns)\n      ++missed_deadlines_;\n    if (realtime_budget_ns) {\n      realtime_processing_ns_ += realtime_processing_ns;\n      realtime_budget_ns_ += realtime_budget_ns;\n    }\n  }""",
+              ),
+              (
+                  """    result.total_p99_ns = total_.percentile_upper_ns(0.99);\n    result.total_max_ns = total_.max_ns();\n    for (size_t i = 0; i < process_by_hops_.size(); ++i) {""",
+                  """    result.total_p99_ns = total_.percentile_upper_ns(0.99);\n    result.total_max_ns = total_.max_ns();\n    result.realtime_processing_ns = realtime_processing_ns_;\n    result.realtime_budget_ns = realtime_budget_ns_;\n    for (size_t i = 0; i < process_by_hops_.size(); ++i) {""",
+              ),
+              (
+                  """  std::array<TimingHistogram, 4> process_by_hops_;\n  uint64_t missed_deadlines_ = 0;\n};""",
+                  """  std::array<TimingHistogram, 4> process_by_hops_;\n  uint64_t missed_deadlines_ = 0;\n  uint64_t realtime_processing_ns_ = 0;\n  uint64_t realtime_budget_ns_ = 0;\n};""",
+              ),
+              (
+                  """    const uint64_t processor_started = os_gettime_ns();\n    DpdfnetProcessResult result = processor_.process(packet);\n    const uint64_t processor_finished = os_gettime_ns();\n    const bool active_processing_result =\n        result.disposition != DpdfnetDisposition::Passthrough;\n    uint64_t overload_retry_delay_ns = 0;""",
+                  """    const uint64_t processor_started = os_gettime_ns();\n    DpdfnetProcessResult result = processor_.process(packet);\n    const uint64_t processor_finished = os_gettime_ns();\n    const uint64_t realtime_processing_ns =\n        processor_finished - processor_started;\n    uint64_t realtime_budget_ns = 0;\n    const bool active_processing_result =\n        result.disposition != DpdfnetDisposition::Passthrough;\n    uint64_t overload_retry_delay_ns = 0;""",
+              ),
+              (
+                  """      const DpdfnetRealtimeObservation observation = realtime_guard_.observe(\n          processor_finished - processor_started, result.processed_hops,\n          active.hop_size, active.model_rate);\n      if (observation.tripped) {\n        std::snprintf(result.message.data(), result.message.size(),\n                      \"processing took %.1f ms for %.1f ms of audio, debt \"\n                      \"%.1f ms\",\n                      (processor_finished - processor_started) / 1e6,\n                      observation.budget_ns / 1e6, observation.debt_ns / 1e6);""",
+                  """      const DpdfnetRealtimeObservation observation = realtime_guard_.observe(\n          realtime_processing_ns, result.processed_hops, active.hop_size,\n          active.model_rate);\n      realtime_budget_ns = observation.budget_ns;\n      if (observation.tripped) {\n        std::snprintf(result.message.data(), result.message.size(),\n                      \"processing took %.1f ms for %.1f ms of audio, debt \"\n                      \"%.1f ms\",\n                      realtime_processing_ns / 1e6, observation.budget_ns / 1e6,\n                      observation.debt_ns / 1e6);""",
+              ),
+              (
+                  """      timings_.record(lock_acquired - lock_start,\n                      processing_finished - lock_acquired,\n                      processing_finished - callback_start, deadline_ns,\n                      result.processed_hops);""",
+                  """      timings_.record(lock_acquired - lock_start,\n                      processing_finished - lock_acquired,\n                      processing_finished - callback_start, deadline_ns,\n                      result.processed_hops, realtime_processing_ns,\n                      realtime_budget_ns);""",
+              ),
+              (
+                  """      if (probe)\n        summary << \", recovering after an overload\";\n    }""",
+                  """      if (probe)\n        summary << \", recovering after an overload\";\n      if (timing.realtime_budget_ns) {\n        const uint64_t load_percent = static_cast<uint64_t>(std::llround(\n            static_cast<double>(timing.realtime_processing_ns) * 100.0 /\n            static_cast<double>(timing.realtime_budget_ns)));\n        summary << \", \" << load_percent << \"% processing load\";\n      }\n    }""",
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"expected source text not found:\n{old}")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Run LLVM clang-format
+        run: clang-format -i src/dpdfnet-filter.cpp
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/dpdfnet-filter.cpp
+          git commit -m "Show realtime processing load in status"
+          git push
