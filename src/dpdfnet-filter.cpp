@@ -532,8 +532,8 @@ public:
           active.hop_size, active.model_rate);
       if (observation.tripped) {
         std::snprintf(result.message.data(), result.message.size(),
-                      "processing took %.1f ms for %.1f ms of audio; overload "
-                      "debt %.1f ms",
+                      "processing took %.1f ms for %.1f ms of audio, debt "
+                      "%.1f ms",
                       (processor_finished - processor_started) / 1e6,
                       observation.budget_ns / 1e6, observation.debt_ns / 1e6);
         if (processor_.disable_for_realtime_overload(result.message.data())) {
@@ -792,60 +792,62 @@ public:
     else
       model_label = snapshot.model_name + " (custom)";
 
-    // The glance line says what the filter is doing, what the listener
-    // hears, and what to do about it. Measurements live in the details.
+    // Two lines: a state word, then one plain sentence or a spec line.
     FilterStatus result;
     std::ostringstream summary;
+    const uint64_t retry_in_s = (retry_in_ns + 999'999'999) / 1'000'000'000;
     if (overload && retry_in_ns) {
       result.severity = StatusSeverity::Warning;
-      summary << "Paused after overload. Audio passes through unprocessed. "
-                 "Retrying automatically.";
+      summary << "Paused\nAudio is passing through unprocessed. Processing "
+                 "will retry in "
+              << retry_in_s << (retry_in_s == 1 ? " second." : " seconds.");
     } else if (overload) {
       result.severity = StatusSeverity::Error;
-      summary << "Off after repeated overload. Audio passes through "
-                 "unprocessed. Switch to DPDFNet2 or reduce load, then press "
-                 "Reset processing.";
+      summary << "Off\nProcessing overloaded repeatedly. Switch to DPDFNet2 or "
+                 "reduce system load, then press Reset processing.";
     } else if (snapshot.processing_disabled) {
       result.severity = StatusSeverity::Error;
-      summary << "Off after repeated errors. Audio passes through unprocessed. "
-                 "Press Reset processing to try again.";
+      summary << "Off\nProcessing failed repeatedly. Press Reset processing to "
+                 "try again.";
     } else if (rate_mismatch) {
       result.severity = StatusSeverity::Error;
-      summary << "Resampling from " << khz(snapshot.sample_rate)
-              << " kHz is unavailable. Audio passes through unprocessed.";
+      summary << "Off\nResampling from " << khz(snapshot.sample_rate)
+              << " kHz is unavailable, so audio is passing through "
+                 "unprocessed.";
     } else if (!snapshot.has_model) {
       result.severity = StatusSeverity::Error;
-      summary << "No model loaded. Audio passes through unprocessed.";
+      summary << "Off\nNo model is loaded, so audio is passing through "
+                 "unprocessed.";
     } else if (!load_error.empty()) {
       result.severity = StatusSeverity::Error;
-      summary << "The selected model failed to load. Still using "
-              << model_label << ".";
+      summary << "Active\nThe selected model failed to load, so " << model_label
+              << " is still in use.";
     } else if (snapshot.capacity_failures) {
       result.severity = StatusSeverity::Error;
-      summary << "Active. A buffer error passed some audio through "
+      summary << "Active\nA buffer error passed some audio through "
                  "unprocessed.";
     } else if (snapshot.bypass) {
       result.severity = StatusSeverity::Warning;
-      summary << "Bypass on. Original audio passes through.";
+      summary << "Bypass\nThe original audio is passing through.";
     } else if (snapshot.consecutive_failures) {
       result.severity = StatusSeverity::Warning;
-      summary << "Active after a processing error. Retrying.";
+      summary << "Active\nRetrying after a processing error.";
     } else if (snapshot.oversized_packets) {
       result.severity = StatusSeverity::Warning;
-      summary << "Active. Some oversized audio packets passed through "
+      summary << "Active\nSome oversized audio packets passed through "
                  "unprocessed.";
     } else if (snapshot.capacity_recovery_pending) {
       result.severity = StatusSeverity::Warning;
-      summary << "Active. Recovering from a buffer error.";
+      summary << "Active\nRecovering from a buffer error.";
     } else {
-      summary << "Active. " << model_label;
+      summary << "Active\n" << model_label;
       if (snapshot.resampling)
         summary << ", resampling from " << khz(snapshot.sample_rate) << " kHz";
       if (probe)
-        summary << ", recovering after overload";
-      summary << ".";
+        summary << ", recovering after an overload";
     }
 
+    // Details are a readout: key and value per line, no periods.
     std::ostringstream text;
     if (snapshot.has_model) {
       const double frame_ms = snapshot.model_rate
@@ -856,55 +858,52 @@ public:
                                 ? snapshot.hop_size * 1000.0 /
                                       static_cast<double>(snapshot.model_rate)
                                 : 0.0;
-      text << model_label;
+      text << "Model: " << model_label;
       if (snapshot.resampling)
         text << ", OBS " << khz(snapshot.sample_rate) << " kHz resampled to "
              << khz(snapshot.model_rate) << " kHz";
       else
-        text << " at " << khz(snapshot.model_rate) << " kHz native";
-      text << ", " << frame_ms << " ms frame, " << hop_ms << " ms hop.";
+        text << ", " << khz(snapshot.model_rate) << " kHz native";
+      text << ", " << frame_ms << " ms frame, " << hop_ms << " ms hop";
     } else {
-      text << "No model is loaded.";
+      text << "Model: none loaded";
     }
     if (!load_error.empty())
-      text << "\nModel load failed: " << load_error << ".";
+      text << "\nModel load failed: " << load_error;
     if (rate_mismatch) {
       if (!resampler_error.empty())
-        text << "\nResampler error: " << resampler_error << ".";
+        text << "\nResampler error: " << resampler_error;
       else if (snapshot.resampler_refresh_required)
-        text << "\nA new resampler is being prepared.";
+        text << "\nResampler: being prepared";
     }
     if (!snapshot.last_error.empty())
       text << (overload ? "\nLast overload: " : "\nLast error: ")
-           << snapshot.last_error << ".";
+           << snapshot.last_error;
     if (overload && retry_in_ns) {
-      text << "\nNext retry in " << (retry_in_ns + 999'999'999) / 1'000'000'000
-           << " s (attempt " << retry_attempts << " of "
-           << DpdfnetOverloadRetrySchedule::MAX_ATTEMPTS << ").";
+      text << "\nNext retry: in " << retry_in_s << " s, attempt "
+           << retry_attempts << " of "
+           << DpdfnetOverloadRetrySchedule::MAX_ATTEMPTS;
     } else if (overload) {
-      text << "\nAutomatic retries are exhausted.";
+      text << "\nNext retry: none, automatic retries are exhausted";
     }
     if (snapshot.bypass)
-      text << "\nBypass is on. Delay-matched original audio is passing through "
-              "and the model stays warm.";
+      text << "\nBypass: on, delay-matched original audio with the model kept "
+              "warm";
     if (snapshot.oversized_packets) {
-      text << "\n"
-           << snapshot.oversized_packets << " audio "
-           << (snapshot.oversized_packets == 1 ? "packet" : "packets")
+      text << "\nOversized packets: " << snapshot.oversized_packets
            << " over the " << DPDFNET_MAX_REALTIME_PACKET_FRAMES
-           << "-frame realtime limit passed through since the last reset.";
+           << "-frame realtime limit since the last reset";
     }
     if (snapshot.capacity_failures) {
-      text << "\nRealtime buffer capacity failed " << snapshot.capacity_failures
-           << " " << (snapshot.capacity_failures == 1 ? "time" : "times")
-           << "; affected audio passed through.";
+      text << "\nBuffer capacity failures: " << snapshot.capacity_failures
+           << ", affected audio passed through";
     }
     if (snapshot.capacity_recovery_pending)
-      text << "\nRecovery is pending.";
+      text << "\nRecovery: pending";
     if (timing.callbacks) {
-      text << "\nWorst callback " << ms(timing.total_max_ns) << " ms; "
+      text << "\nWorst callback: " << ms(timing.total_max_ns) << " ms, "
            << timing.missed_deadlines << " of " << timing.callbacks
-           << " callbacks missed their deadline.";
+           << " missed the deadline";
     }
 
     result.summary = summary.str();

@@ -454,14 +454,14 @@ void verify_status_property(obs_properties_t *properties) {
   require(summary != nullptr, "status summary is missing");
   const char *summary_description = obs_property_description(summary);
   require(summary_description &&
-              std::string(summary_description).rfind("Active. ", 0) == 0,
+              std::string(summary_description).rfind("Active\n", 0) == 0,
           "status summary does not lead with the active state");
 
   obs_property_t *status = obs_properties_get(properties, "status_info");
   require(status != nullptr, "status property is missing");
   const char *description = obs_property_description(status);
   require(description &&
-              std::string(description).find("ms hop.") != std::string::npos,
+              std::string(description).find("ms hop") != std::string::npos,
           "status details do not report the active model");
 }
 
@@ -617,7 +617,7 @@ void test_direct_callbacks(const std::string &model_path) {
     const char *bypass_summary = obs_property_description(
         obs_properties_get(properties, "status_summary"));
     require(bypass_summary &&
-                std::string(bypass_summary).rfind("Bypass on.", 0) == 0,
+                std::string(bypass_summary).rfind("Bypass\n", 0) == 0,
             "status did not follow the bypass change");
     obs_data_set_bool(settings, "bypass", false);
     dpdfnet_filter_info.update(filter.get(), settings);
