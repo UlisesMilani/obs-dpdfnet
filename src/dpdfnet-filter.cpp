@@ -1154,6 +1154,13 @@ bool model_selection_modified(void *, obs_properties_t *props, obs_property_t *,
   return true;
 }
 
+void set_tooltip(obs_property_t *property, const char *key) {
+  // Qt only word-wraps tooltips it recognizes as rich text.
+  const std::string html =
+      std::string("<html>") + obs_module_text(key) + "</html>";
+  obs_property_set_long_description(property, html.c_str());
+}
+
 obs_properties_t *filter_properties(void *data) {
   obs_properties_t *props = obs_properties_create();
   if (data) {
@@ -1177,16 +1184,14 @@ obs_properties_t *filter_properties(void *data) {
                                DPDFNET_MODEL_LOW_CPU);
   obs_property_list_add_string(
       selection, obs_module_text("DPDFNet.Model.Custom"), DPDFNET_MODEL_CUSTOM);
-  obs_property_set_long_description(
-      selection, obs_module_text("DPDFNet.ModelSelection.Tooltip"));
+  set_tooltip(selection, "DPDFNet.ModelSelection.Tooltip");
   obs_property_set_modified_callback2(selection, model_selection_modified,
                                       data);
 
   obs_property_t *model_path = obs_properties_add_path(
       processing, SETTING_MODEL_PATH, obs_module_text("DPDFNet.ModelPath"),
       OBS_PATH_FILE, "ONNX model (*.onnx);;All files (*.*)", nullptr);
-  obs_property_set_long_description(
-      model_path, obs_module_text("DPDFNet.ModelPath.Tooltip"));
+  set_tooltip(model_path, "DPDFNet.ModelPath.Tooltip");
   const bool custom_selected =
       data && static_cast<DpdfnetFilter *>(data)->custom_model_selected();
   obs_property_set_visible(model_path, custom_selected);
@@ -1201,34 +1206,29 @@ obs_properties_t *filter_properties(void *data) {
                             obs_module_text("DPDFNet.InputChannel.Input2"), 1);
   obs_property_list_add_int(input_channel,
                             obs_module_text("DPDFNet.InputChannel.Mix"), -1);
-  obs_property_set_long_description(
-      input_channel, obs_module_text("DPDFNet.InputChannel.Tooltip"));
+  set_tooltip(input_channel, "DPDFNet.InputChannel.Tooltip");
 
   obs_property_t *attenuation = obs_properties_add_float_slider(
       processing, SETTING_ATTENUATION_LIMIT_DB,
       obs_module_text("DPDFNet.AttenuationLimit"), 0.0, 60.0, 0.5);
   obs_property_float_set_suffix(attenuation, " dB");
-  obs_property_set_long_description(
-      attenuation, obs_module_text("DPDFNet.AttenuationLimit.Tooltip"));
+  set_tooltip(attenuation, "DPDFNet.AttenuationLimit.Tooltip");
 
   obs_property_t *wet = obs_properties_add_float_slider(
       processing, SETTING_WET_MIX, obs_module_text("DPDFNet.WetMix"), 0.0,
       100.0, 1.0);
   obs_property_float_set_suffix(wet, "%");
-  obs_property_set_long_description(wet,
-                                    obs_module_text("DPDFNet.WetMix.Tooltip"));
+  set_tooltip(wet, "DPDFNet.WetMix.Tooltip");
 
   obs_property_t *gain = obs_properties_add_float_slider(
       processing, SETTING_OUTPUT_GAIN_DB, obs_module_text("DPDFNet.OutputGain"),
       -12.0, 12.0, 0.1);
   obs_property_float_set_suffix(gain, " dB");
-  obs_property_set_long_description(
-      gain, obs_module_text("DPDFNet.OutputGain.Tooltip"));
+  set_tooltip(gain, "DPDFNet.OutputGain.Tooltip");
 
   obs_property_t *bypass = obs_properties_add_bool(
       processing, SETTING_BYPASS, obs_module_text("DPDFNet.Bypass"));
-  obs_property_set_long_description(bypass,
-                                    obs_module_text("DPDFNet.Bypass.Tooltip"));
+  set_tooltip(bypass, "DPDFNet.Bypass.Tooltip");
 
   obs_properties_add_group(props, "processing_group",
                            obs_module_text("DPDFNet.Processing"),
@@ -1244,14 +1244,12 @@ obs_properties_t *filter_properties(void *data) {
   obs_property_t *refresh = obs_properties_add_button2(
       diagnostics, "refresh_status", obs_module_text("DPDFNet.RefreshStatus"),
       refresh_clicked, data);
-  obs_property_set_long_description(
-      refresh, obs_module_text("DPDFNet.RefreshStatus.Tooltip"));
+  set_tooltip(refresh, "DPDFNet.RefreshStatus.Tooltip");
 
   obs_property_t *reset = obs_properties_add_button2(
       diagnostics, "reset_state", obs_module_text("DPDFNet.ResetState"),
       reset_clicked, data);
-  obs_property_set_long_description(
-      reset, obs_module_text("DPDFNet.ResetState.Tooltip"));
+  set_tooltip(reset, "DPDFNet.ResetState.Tooltip");
 
   obs_properties_add_group(props, "diagnostics_group",
                            obs_module_text("DPDFNet.Diagnostics"),
