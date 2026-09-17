@@ -51,8 +51,8 @@ public:
 
 private:
   static constexpr uint64_t NS_PER_SECOND = 1'000'000'000ULL;
-  static constexpr uint64_t MAX_DEBT_NS = 100'000'000ULL;
-  static constexpr uint64_t MIN_OBSERVED_AUDIO_NS = 100'000'000ULL;
+  static constexpr uint64_t MAX_DEBT_NS = 500'000'000ULL;
+  static constexpr uint64_t MIN_OBSERVED_AUDIO_NS = 2'000'000'000ULL;
 
   static uint64_t saturating_add(uint64_t left, uint64_t right) noexcept {
     const uint64_t max = std::numeric_limits<uint64_t>::max();
