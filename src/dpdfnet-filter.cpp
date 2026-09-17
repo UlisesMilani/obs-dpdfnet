@@ -825,7 +825,13 @@ public:
            << timing.missed_deadlines << "/" << timing.callbacks << ".";
     }
 
-    if (snapshot.processing_disabled || rate_mismatch || !snapshot.has_model) {
+    if (snapshot.processing_disabled &&
+        snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload) {
+      result.summary =
+          "Processing is disabled after sustained realtime overload. Audio is "
+          "currently passing through unprocessed.";
+    } else if (snapshot.processing_disabled || rate_mismatch ||
+               !snapshot.has_model) {
       result.summary = "Processing is unavailable. Audio is passing through.";
     } else if (!load_error.empty()) {
       result.summary =
