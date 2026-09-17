@@ -28,6 +28,7 @@ constexpr const char *SETTING_ATTENUATION_LIMIT_DB = "attenuation_limit_db";
 constexpr const char *SETTING_WET_MIX = "wet_mix";
 constexpr const char *SETTING_OUTPUT_GAIN_DB = "output_gain_db";
 constexpr const char *SETTING_BYPASS = "bypass";
+constexpr const char *SETTING_SHOW_DETAILS = "show_details";
 
 constexpr const char *QUALITY_MODEL_FILE = "models/dpdfnet8_48khz_hr.onnx";
 constexpr const char *LOW_CPU_MODEL_FILE = "models/dpdfnet2_48khz_hr.onnx";
@@ -239,6 +240,7 @@ public:
     controls.output_gain =
         db_to_amp(obs_data_get_double(settings, SETTING_OUTPUT_GAIN_DB));
     controls.bypass = obs_data_get_bool(settings, SETTING_BYPASS);
+    const bool show_details = obs_data_get_bool(settings, SETTING_SHOW_DETAILS);
 
     const uint32_t obs_rate = audio_output_get_sample_rate(obs_get_audio());
     const size_t obs_channels =
@@ -430,6 +432,7 @@ public:
       controls_ = controls;
       processor_.set_controls(controls_);
       custom_model_selected_ = selection == DPDFNET_MODEL_CUSTOM;
+      show_details_ = show_details;
       if (model_loaded || format_boundary ||
           (fresh_resamplers && !model_activation_failed) || fallback_attempted)
         reset_timing_epoch();
@@ -528,14 +531,11 @@ public:
           processor_finished - processor_started, result.processed_hops,
           active.hop_size, active.model_rate);
       if (observation.tripped) {
-        std::snprintf(
-            result.message.data(), result.message.size(),
-            "processing used %llu us for %llu us of model audio; accumulated "
-            "overload debt is %llu us",
-            static_cast<unsigned long long>(
-                (processor_finished - processor_started) / 1000),
-            static_cast<unsigned long long>(observation.budget_ns / 1000),
-            static_cast<unsigned long long>(observation.debt_ns / 1000));
+        std::snprintf(result.message.data(), result.message.size(),
+                      "processing took %.1f ms for %.1f ms of audio; overload "
+                      "debt %.1f ms",
+                      (processor_finished - processor_started) / 1e6,
+                      observation.budget_ns / 1e6, observation.debt_ns / 1e6);
         if (processor_.disable_for_realtime_overload(result.message.data())) {
           result.fail_open();
           result.event = DpdfnetEvent::RealtimeOverloadCircuitOpened;
@@ -727,11 +727,15 @@ public:
     DpdfnetProcessorSnapshot snapshot;
     TimingSnapshot timing;
     const DpdfnetModel *model = nullptr;
+    bool probe = false;
+    size_t retry_attempts = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       state = processor_.state();
       timing = timings_.snapshot();
       model = processor_.model();
+      probe = realtime_guard_.probe();
+      retry_attempts = overload_retries_.attempts();
     }
     snapshot.has_model = state.has_model;
     snapshot.resampling = state.resampling;
@@ -766,8 +770,6 @@ public:
       }
     }
 
-    std::ostringstream text;
-    FilterStatus result;
     const auto khz = [](double hz) { return hz / 1000.0; };
     const auto ms = [](uint64_t ns) {
       char buffer[32];
@@ -778,84 +780,74 @@ public:
         snapshot.has_model && snapshot.sample_rate && snapshot.model_rate > 0 &&
         snapshot.sample_rate != static_cast<uint32_t>(snapshot.model_rate) &&
         !snapshot.resampling;
-    if (snapshot.processing_disabled &&
-        snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload) {
+    const bool overload =
+        snapshot.processing_disabled &&
+        snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload;
+    std::string model_label;
+    if (paths_equivalent_for_status(snapshot.model_path, quality_model_path()))
+      model_label = "DPDFNet8";
+    else if (paths_equivalent_for_status(snapshot.model_path,
+                                         low_cpu_model_path()))
+      model_label = "DPDFNet2";
+    else
+      model_label = snapshot.model_name + " (custom)";
+
+    // The glance line says what the filter is doing, what the listener
+    // hears, and what to do about it. Measurements live in the details.
+    FilterStatus result;
+    std::ostringstream summary;
+    if (overload && retry_in_ns) {
+      result.severity = StatusSeverity::Warning;
+      summary << "Paused after overload. Audio passes through unprocessed. "
+                 "Retrying automatically.";
+    } else if (overload) {
       result.severity = StatusSeverity::Error;
-      if (retry_in_ns) {
-        text << "Processing is paused after sustained realtime overload. "
-                "Audio is passing through unprocessed. Processing retries in "
-             << (retry_in_ns + 999'999'999) / 1'000'000'000
-             << " s. Switch to DPDFNet2 or reduce system load.";
-      } else {
-        text << "Processing is disabled after repeated realtime overload. "
-                "Audio is passing through unprocessed. Switch to DPDFNet2 or "
-                "reduce system load, then press Reset processing.";
-      }
-      if (!snapshot.last_error.empty())
-        text << "\nLast overload: " << snapshot.last_error << ".";
-      if (!load_error.empty())
-        text << "\nThe selected model also failed to load: " << load_error
-             << ".";
+      summary << "Off after repeated overload. Audio passes through "
+                 "unprocessed. Switch to DPDFNet2 or reduce load, then press "
+                 "Reset processing.";
     } else if (snapshot.processing_disabled) {
       result.severity = StatusSeverity::Error;
-      text << "Processing is disabled after repeated errors. Audio is passing "
-              "through unprocessed. Press Reset processing to try again.";
-      if (!snapshot.last_error.empty())
-        text << "\nLast error: " << snapshot.last_error << ".";
-      if (!load_error.empty())
-        text << "\nThe selected model also failed to load: " << load_error
-             << ".";
+      summary << "Off after repeated errors. Audio passes through unprocessed. "
+                 "Press Reset processing to try again.";
     } else if (rate_mismatch) {
       result.severity = StatusSeverity::Error;
-      text << "Resampling from OBS " << khz(snapshot.sample_rate)
-           << " kHz to the " << khz(snapshot.model_rate)
-           << " kHz model is unavailable. Audio is passing through "
-              "unprocessed.";
-      if (!resampler_error.empty())
-        text << "\nResampler error: " << resampler_error << ".";
-      else if (snapshot.resampler_refresh_required)
-        text << "\nA new resampler is being prepared.";
-      if (!load_error.empty())
-        text << "\nThe selected model also failed to load: " << load_error
-             << ".";
-    } else if (!load_error.empty()) {
-      result.severity = StatusSeverity::Error;
-      text << "The selected model failed to load: " << load_error << ".";
-      if (snapshot.has_model)
-        text << "\nStill using " << snapshot.model_name << ".";
-      else
-        text << "\nNo model is active. Audio is passing through unprocessed.";
+      summary << "Resampling from " << khz(snapshot.sample_rate)
+              << " kHz is unavailable. Audio passes through unprocessed.";
     } else if (!snapshot.has_model) {
       result.severity = StatusSeverity::Error;
-      text << "No model is active. Audio is passing through unprocessed.";
+      summary << "No model loaded. Audio passes through unprocessed.";
+    } else if (!load_error.empty()) {
+      result.severity = StatusSeverity::Error;
+      summary << "The selected model failed to load. Still using "
+              << model_label << ".";
+    } else if (snapshot.capacity_failures) {
+      result.severity = StatusSeverity::Error;
+      summary << "Active. A buffer error passed some audio through "
+                 "unprocessed.";
+    } else if (snapshot.bypass) {
+      result.severity = StatusSeverity::Warning;
+      summary << "Bypass on. Original audio passes through.";
+    } else if (snapshot.consecutive_failures) {
+      result.severity = StatusSeverity::Warning;
+      summary << "Active after a processing error. Retrying.";
+    } else if (snapshot.oversized_packets) {
+      result.severity = StatusSeverity::Warning;
+      summary << "Active. Some oversized audio packets passed through "
+                 "unprocessed.";
+    } else if (snapshot.capacity_recovery_pending) {
+      result.severity = StatusSeverity::Warning;
+      summary << "Active. Recovering from a buffer error.";
     } else {
-      if (snapshot.consecutive_failures) {
-        result.severity = StatusSeverity::Warning;
-        text << "The last processing attempt failed and will be retried.";
-        if (!snapshot.last_error.empty())
-          text << " Last error: " << snapshot.last_error << ".";
-        text << "\n";
-      }
-      if (snapshot.bypass) {
-        result.severity = StatusSeverity::Warning;
-        text << "Bypass is on. Delay-matched original audio is passing "
-                "through and the model stays warm.\n";
-      }
-      text << "Active: ";
-      if (paths_equivalent_for_status(snapshot.model_path,
-                                      quality_model_path()))
-        text << "DPDFNet8";
-      else if (paths_equivalent_for_status(snapshot.model_path,
-                                           low_cpu_model_path()))
-        text << "DPDFNet2";
-      else
-        text << snapshot.model_name << " (custom)";
-      if (snapshot.resampling) {
-        text << ", OBS " << khz(snapshot.sample_rate) << " kHz resampled to "
-             << khz(snapshot.model_rate) << " kHz";
-      } else {
-        text << ", " << khz(snapshot.model_rate) << " kHz native";
-      }
+      summary << "Active. " << model_label;
+      if (snapshot.resampling)
+        summary << ", resampling from " << khz(snapshot.sample_rate) << " kHz";
+      if (probe)
+        summary << ", recovering after overload";
+      summary << ".";
+    }
+
+    std::ostringstream text;
+    if (snapshot.has_model) {
       const double frame_ms = snapshot.model_rate
                                   ? snapshot.n_fft * 1000.0 /
                                         static_cast<double>(snapshot.model_rate)
@@ -864,12 +856,38 @@ public:
                                 ? snapshot.hop_size * 1000.0 /
                                       static_cast<double>(snapshot.model_rate)
                                 : 0.0;
-      text << ", " << frame_ms << " ms frame / " << hop_ms << " ms hop";
+      text << model_label;
+      if (snapshot.resampling)
+        text << ", OBS " << khz(snapshot.sample_rate) << " kHz resampled to "
+             << khz(snapshot.model_rate) << " kHz";
+      else
+        text << " at " << khz(snapshot.model_rate) << " kHz native";
+      text << ", " << frame_ms << " ms frame, " << hop_ms << " ms hop.";
+    } else {
+      text << "No model is loaded.";
     }
-
+    if (!load_error.empty())
+      text << "\nModel load failed: " << load_error << ".";
+    if (rate_mismatch) {
+      if (!resampler_error.empty())
+        text << "\nResampler error: " << resampler_error << ".";
+      else if (snapshot.resampler_refresh_required)
+        text << "\nA new resampler is being prepared.";
+    }
+    if (!snapshot.last_error.empty())
+      text << (overload ? "\nLast overload: " : "\nLast error: ")
+           << snapshot.last_error << ".";
+    if (overload && retry_in_ns) {
+      text << "\nNext retry in " << (retry_in_ns + 999'999'999) / 1'000'000'000
+           << " s (attempt " << retry_attempts << " of "
+           << DpdfnetOverloadRetrySchedule::MAX_ATTEMPTS << ").";
+    } else if (overload) {
+      text << "\nAutomatic retries are exhausted.";
+    }
+    if (snapshot.bypass)
+      text << "\nBypass is on. Delay-matched original audio is passing through "
+              "and the model stays warm.";
     if (snapshot.oversized_packets) {
-      if (result.severity == StatusSeverity::Normal)
-        result.severity = StatusSeverity::Warning;
       text << "\n"
            << snapshot.oversized_packets << " audio "
            << (snapshot.oversized_packets == 1 ? "packet" : "packets")
@@ -877,51 +895,19 @@ public:
            << "-frame realtime limit passed through since the last reset.";
     }
     if (snapshot.capacity_failures) {
-      result.severity = StatusSeverity::Error;
       text << "\nRealtime buffer capacity failed " << snapshot.capacity_failures
            << " " << (snapshot.capacity_failures == 1 ? "time" : "times")
            << "; affected audio passed through.";
     }
     if (snapshot.capacity_recovery_pending)
       text << "\nRecovery is pending.";
-
     if (timing.callbacks) {
-      text << "\nCallback p99 under " << ms(timing.total_p99_ns) << " ms, max "
-           << ms(timing.total_max_ns) << " ms, " << timing.missed_deadlines
-           << " of " << timing.callbacks << " callbacks missed the deadline";
+      text << "\nWorst callback " << ms(timing.total_max_ns) << " ms; "
+           << timing.missed_deadlines << " of " << timing.callbacks
+           << " callbacks missed their deadline.";
     }
 
-    if (snapshot.processing_disabled &&
-        snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload) {
-      result.summary =
-          retry_in_ns ? "Processing is paused after realtime overload and will "
-                        "retry. Audio is currently passing through unprocessed."
-                      : "Processing is disabled after repeated realtime "
-                        "overload. Audio is currently passing through "
-                        "unprocessed.";
-    } else if (snapshot.processing_disabled || rate_mismatch ||
-               !snapshot.has_model) {
-      result.summary =
-          "Processing is unavailable. Audio is passing through unprocessed.";
-    } else if (!load_error.empty()) {
-      result.summary =
-          "The selected model failed to load. The previous model is still "
-          "active.";
-    } else if (snapshot.capacity_failures) {
-      result.summary =
-          "A realtime buffer error occurred. Affected audio passed through.";
-    } else if (snapshot.oversized_packets) {
-      result.summary =
-          "Some oversized audio packets passed through without enhancement.";
-    } else if (snapshot.capacity_recovery_pending) {
-      result.summary = "Processing recovery is pending.";
-    } else if (snapshot.consecutive_failures) {
-      result.summary = "Processing is active after a recent error.";
-    } else if (snapshot.bypass) {
-      result.summary = "Bypass is on. Audio is not being enhanced.";
-    } else {
-      result.summary = "Processing normally.";
-    }
+    result.summary = summary.str();
     result.text = text.str();
     return result;
   }
@@ -934,6 +920,11 @@ public:
   bool custom_model_selected() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return custom_model_selected_;
+  }
+
+  bool show_details() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return show_details_;
   }
 
 private:
@@ -1169,6 +1160,7 @@ private:
   DpdfnetOverloadRetrySchedule overload_retries_;
   uint64_t probe_audio_ns_ = 0;
   bool custom_model_selected_ = false;
+  bool show_details_ = false;
   std::string active_model_path_;
   bool have_failed_model_path_ = false;
   std::string failed_model_path_;
@@ -1212,6 +1204,7 @@ void filter_defaults(obs_data_t *settings) {
   obs_data_set_default_double(settings, SETTING_WET_MIX, 100.0);
   obs_data_set_default_double(settings, SETTING_OUTPUT_GAIN_DB, 0.0);
   obs_data_set_default_bool(settings, SETTING_BYPASS, false);
+  obs_data_set_default_bool(settings, SETTING_SHOW_DETAILS, false);
 }
 
 obs_text_info_type status_info_type(StatusSeverity severity) {
@@ -1260,6 +1253,18 @@ bool model_selection_modified(void *, obs_properties_t *props, obs_property_t *,
   return true;
 }
 
+bool show_details_modified(void *data, obs_properties_t *props,
+                           obs_property_t *, obs_data_t *settings) {
+  const bool show = obs_data_get_bool(settings, SETTING_SHOW_DETAILS);
+  if (obs_property_t *details = obs_properties_get(props, "status_info"))
+    obs_property_set_visible(details, show);
+  if (obs_property_t *refresh = obs_properties_get(props, "refresh_status"))
+    obs_property_set_visible(refresh, show);
+  if (show)
+    update_status_properties(props, data);
+  return true;
+}
+
 void set_tooltip(obs_property_t *property, const char *key) {
   // Qt only word-wraps tooltips it recognizes as rich text.
   const std::string html =
@@ -1269,12 +1274,24 @@ void set_tooltip(obs_property_t *property, const char *key) {
 
 obs_properties_t *filter_properties(void *data) {
   obs_properties_t *props = obs_properties_create();
+  FilterStatus status;
+  bool show_details = false;
+  bool custom_selected = false;
   if (data) {
-    const FilterStatus status = static_cast<DpdfnetFilter *>(data)->status();
-    obs_property_t *summary = obs_properties_add_text(
-        props, "status_summary", status.summary.c_str(), OBS_TEXT_INFO);
-    obs_property_text_set_info_type(summary, status_info_type(status.severity));
+    auto *filter = static_cast<DpdfnetFilter *>(data);
+    status = filter->status();
+    show_details = filter->show_details();
+    custom_selected = filter->custom_model_selected();
   }
+
+  obs_properties_t *status_group = obs_properties_create();
+  obs_property_t *summary = obs_properties_add_text(
+      status_group, "status_summary", status.summary.c_str(), OBS_TEXT_INFO);
+  obs_property_text_set_info_type(summary, status_info_type(status.severity));
+  obs_property_text_set_info_word_wrap(summary, true);
+  obs_properties_add_group(props, "status_group",
+                           obs_module_text("DPDFNet.Status"), OBS_GROUP_NORMAL,
+                           status_group);
 
   obs_properties_t *processing = obs_properties_create();
 
@@ -1298,8 +1315,6 @@ obs_properties_t *filter_properties(void *data) {
       processing, SETTING_MODEL_PATH, obs_module_text("DPDFNet.ModelPath"),
       OBS_PATH_FILE, "ONNX model (*.onnx);;All files (*.*)", nullptr);
   set_tooltip(model_path, "DPDFNet.ModelPath.Tooltip");
-  const bool custom_selected =
-      data && static_cast<DpdfnetFilter *>(data)->custom_model_selected();
   obs_property_set_visible(model_path, custom_selected);
 
   obs_property_t *input_channel =
@@ -1341,16 +1356,23 @@ obs_properties_t *filter_properties(void *data) {
                            OBS_GROUP_NORMAL, processing);
 
   obs_properties_t *diagnostics = obs_properties_create();
-  if (data) {
-    const FilterStatus status = static_cast<DpdfnetFilter *>(data)->status();
-    obs_properties_add_text(diagnostics, "status_info", status.text.c_str(),
-                            OBS_TEXT_INFO);
-  }
+  obs_property_t *details_toggle =
+      obs_properties_add_bool(diagnostics, SETTING_SHOW_DETAILS,
+                              obs_module_text("DPDFNet.ShowDetails"));
+  set_tooltip(details_toggle, "DPDFNet.ShowDetails.Tooltip");
+  obs_property_set_modified_callback2(details_toggle, show_details_modified,
+                                      data);
+
+  obs_property_t *details = obs_properties_add_text(
+      diagnostics, "status_info", status.text.c_str(), OBS_TEXT_INFO);
+  obs_property_text_set_info_word_wrap(details, true);
+  obs_property_set_visible(details, show_details);
 
   obs_property_t *refresh = obs_properties_add_button2(
       diagnostics, "refresh_status", obs_module_text("DPDFNet.RefreshStatus"),
       refresh_clicked, data);
   set_tooltip(refresh, "DPDFNet.RefreshStatus.Tooltip");
+  obs_property_set_visible(refresh, show_details);
 
   obs_property_t *reset = obs_properties_add_button2(
       diagnostics, "reset_state", obs_module_text("DPDFNet.ResetState"),

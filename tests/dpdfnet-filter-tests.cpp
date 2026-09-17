@@ -454,22 +454,21 @@ void verify_status_property(obs_properties_t *properties) {
   require(summary != nullptr, "status summary is missing");
   const char *summary_description = obs_property_description(summary);
   require(summary_description &&
-              std::string(summary_description) == "Processing normally.",
-          "status summary is not concise or does not report normal operation");
+              std::string(summary_description).rfind("Active. ", 0) == 0,
+          "status summary does not lead with the active state");
 
   obs_property_t *status = obs_properties_get(properties, "status_info");
   require(status != nullptr, "status property is missing");
   const char *description = obs_property_description(status);
   require(description &&
-              std::string(description).find("Active:") != std::string::npos,
-          "status property does not report an active model");
+              std::string(description).find("ms hop.") != std::string::npos,
+          "status details do not report the active model");
 }
 
 void verify_properties_layout(obs_properties_t *properties,
                               obs_data_t *settings) {
   constexpr std::array<const char *, 4> root_order = {
-      "status_summary", "processing_group", "diagnostics_group",
-      "version_info"};
+      "status_group", "processing_group", "diagnostics_group", "version_info"};
   obs_property_t *root_property = obs_properties_first(properties);
   for (const char *expected : root_order) {
     require(root_property != nullptr, "settings layout is missing a root row");
@@ -480,10 +479,17 @@ void verify_properties_layout(obs_properties_t *properties,
   require(root_property == nullptr,
           "settings layout contains an unexpected root row");
 
+  obs_property_t *status_group = obs_properties_get(properties, "status_group");
   obs_property_t *processing_group =
       obs_properties_get(properties, "processing_group");
   obs_property_t *diagnostics_group =
       obs_properties_get(properties, "diagnostics_group");
+  require(status_group &&
+              obs_property_get_type(status_group) == OBS_PROPERTY_GROUP &&
+              obs_property_group_type(status_group) == OBS_GROUP_NORMAL &&
+              obs_properties_get(obs_property_group_content(status_group),
+                                 "status_summary") != nullptr,
+          "status line is not in its own normal group");
   require(processing_group &&
               obs_property_get_type(processing_group) == OBS_PROPERTY_GROUP &&
               obs_property_group_type(processing_group) == OBS_GROUP_NORMAL,
@@ -501,21 +507,30 @@ void verify_properties_layout(obs_properties_t *properties,
     require(obs_properties_get(processing, name) != nullptr,
             "processing group is missing a control");
   }
-  for (const char *name : {"status_info", "refresh_status", "reset_state"}) {
+  for (const char *name :
+       {"show_details", "status_info", "refresh_status", "reset_state"}) {
     require(obs_properties_get(diagnostics, name) != nullptr,
             "diagnostics group is missing a control");
   }
+  const bool show_details = obs_data_get_bool(settings, "show_details");
+  require(obs_property_visible(
+              obs_properties_get(diagnostics, "status_info")) == show_details &&
+              obs_property_visible(obs_properties_get(
+                  diagnostics, "refresh_status")) == show_details,
+          "diagnostics details visibility does not follow Show details");
 
-  for (const char *name : {"model_selection", "model_path", "input_channel",
-                           "attenuation_limit_db", "wet_mix", "output_gain_db",
-                           "bypass", "refresh_status", "reset_state"}) {
+  for (const char *name :
+       {"model_selection", "model_path", "input_channel",
+        "attenuation_limit_db", "wet_mix", "output_gain_db", "bypass",
+        "show_details", "refresh_status", "reset_state"}) {
     obs_property_t *property = obs_properties_get(properties, name);
     const char *tooltip =
         property ? obs_property_long_description(property) : nullptr;
     require(tooltip && *tooltip, "settings control is missing its help text");
   }
 
-  require(!obs_data_has_user_value(settings, "processing_group") &&
+  require(!obs_data_has_user_value(settings, "status_group") &&
+              !obs_data_has_user_value(settings, "processing_group") &&
               !obs_data_has_user_value(settings, "diagnostics_group") &&
               !obs_data_has_user_value(settings, "status_summary"),
           "UI-only layout properties leaked into saved settings");
@@ -568,6 +583,21 @@ void test_direct_callbacks(const std::string &model_path) {
 
     verify_properties_layout(properties, settings);
     verify_status_property(properties);
+    obs_property_t *details_toggle =
+        obs_properties_get(properties, "show_details");
+    obs_property_t *details = obs_properties_get(properties, "status_info");
+    require(details_toggle && details && !obs_property_visible(details),
+            "diagnostics details are visible before Show details is on");
+    obs_data_set_bool(settings, "show_details", true);
+    require(obs_property_modified(details_toggle, settings) &&
+                obs_property_visible(details) &&
+                obs_property_visible(
+                    obs_properties_get(properties, "refresh_status")),
+            "Show details did not reveal the diagnostics details");
+    obs_data_set_bool(settings, "show_details", false);
+    require(obs_property_modified(details_toggle, settings) &&
+                !obs_property_visible(details),
+            "Show details did not hide the diagnostics details again");
     obs_property_t *refresh = obs_properties_get(properties, "refresh_status");
     require(refresh && obs_property_button_clicked(refresh, nullptr),
             "Refresh button callback failed");
@@ -828,13 +858,15 @@ int main(int argc, char **argv) {
 
   bool started = false;
   try {
-    const auto before = filter_test_instrumentation::callback_allocations.load();
+    const auto before =
+        filter_test_instrumentation::callback_allocations.load();
     {
       CallbackScope callback;
       void *memory = ::operator new(64);
       ::operator delete(memory);
     }
-    require(filter_test_instrumentation::callback_allocations.load() == before + 1,
+    require(filter_test_instrumentation::callback_allocations.load() ==
+                before + 1,
             "callback allocation instrumentation is inactive");
     const std::filesystem::path model =
         std::filesystem::absolute(argv[1]).lexically_normal();

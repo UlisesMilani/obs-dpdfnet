@@ -41,7 +41,7 @@ Start with:
 - `Model`: `DPDFNet8 (best quality, more CPU)`
 - `Input channel`: `Input 1 / left`
 - `Suppression limit`: `24-30 dB`
-- `Wet mix`: `100%`
+- `Mix`: `100%`
 - `Output gain`: `0 dB`
 - OBS sample rate: `48 kHz` (the bundled models run natively, no resampling)
 
@@ -73,12 +73,14 @@ model's spectral output delay, excluding STFT buffering and resampling. Models
 that fail the contract or produce non-finite warm-up output are rejected and
 the active model stays loaded.
 
-The `Diagnostics` group shows the active model, native or resampled operation,
-frame and hop sizes, and callback timing for the current run. Timing restarts
-on model, format, resampler, and reset changes; passthrough callbacks are not
-counted. Oversized-packet and buffer-capacity counts persist until a reset or
-model change. These are processing measurements, not end-to-end microphone
-latency. Press `Refresh` to update them.
+The `Status` line says what the filter is doing and what the listener hears.
+`Show details` in the `Diagnostics` group reveals the processing measurements
+for the current run: the active model, native or resampled operation, frame
+and hop sizes, and callback timing. Timing restarts on model, format,
+resampler, and reset changes; passthrough callbacks are not counted.
+Oversized-packet and buffer-capacity counts persist until a reset or model
+change. These are processing measurements, not end-to-end microphone latency.
+Press `Refresh` to update them.
 
 ## Build From Source On Windows
 
