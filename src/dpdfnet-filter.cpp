@@ -714,6 +714,12 @@ public:
 
     std::ostringstream text;
     FilterStatus result;
+    const auto khz = [](double hz) { return hz / 1000.0; };
+    const auto ms = [](uint64_t ns) {
+      char buffer[32];
+      std::snprintf(buffer, sizeof(buffer), "%.1f", ns / 1e6);
+      return std::string(buffer);
+    };
     const bool rate_mismatch =
         snapshot.has_model && snapshot.sample_rate && snapshot.model_rate > 0 &&
         snapshot.sample_rate != static_cast<uint32_t>(snapshot.model_rate) &&
@@ -722,70 +728,72 @@ public:
         snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload) {
       result.severity = StatusSeverity::Error;
       text << "Processing is disabled after sustained realtime overload. Audio "
-              "is passing through. Choose the lower-CPU model, or reduce "
-              "system load and use Retry / reset processing.";
+              "is passing through unprocessed. Switch to DPDFNet2 or reduce "
+              "system load, then press Reset processing.";
       if (!snapshot.last_error.empty())
-        text << " Last overload: " << snapshot.last_error << ".";
+        text << "\nLast overload: " << snapshot.last_error << ".";
       if (!load_error.empty())
-        text << " The selected model also could not be loaded: " << load_error
+        text << "\nThe selected model also failed to load: " << load_error
              << ".";
     } else if (snapshot.processing_disabled) {
       result.severity = StatusSeverity::Error;
       text << "Processing is disabled after repeated errors. Audio is passing "
-              "through. Use Retry / reset processing to try again.";
+              "through unprocessed. Press Reset processing to try again.";
       if (!snapshot.last_error.empty())
-        text << " Last processing error: " << snapshot.last_error << ".";
+        text << "\nLast error: " << snapshot.last_error << ".";
       if (!load_error.empty())
-        text << " The selected model also could not be loaded: " << load_error
+        text << "\nThe selected model also failed to load: " << load_error
              << ".";
     } else if (rate_mismatch) {
       result.severity = StatusSeverity::Error;
-      text << "Sample-rate conversion from OBS " << snapshot.sample_rate
-           << " Hz to the active " << snapshot.model_rate
-           << " Hz model is unavailable. Audio is passing through.";
+      text << "Resampling from OBS " << khz(snapshot.sample_rate)
+           << " kHz to the " << khz(snapshot.model_rate)
+           << " kHz model is unavailable. Audio is passing through "
+              "unprocessed.";
       if (!resampler_error.empty())
-        text << " Resampler error: " << resampler_error << ".";
+        text << "\nResampler error: " << resampler_error << ".";
       else if (snapshot.resampler_refresh_required)
-        text << " A fresh resampler pair is being prepared.";
+        text << "\nA new resampler is being prepared.";
       if (!load_error.empty())
-        text << " The selected model also could not be loaded: " << load_error
+        text << "\nThe selected model also failed to load: " << load_error
              << ".";
     } else if (!load_error.empty()) {
       result.severity = StatusSeverity::Error;
-      text << "Selected model could not be loaded: " << load_error << ". ";
+      text << "The selected model failed to load: " << load_error << ".";
       if (snapshot.has_model)
-        text << "Still using " << snapshot.model_name << ".";
+        text << "\nStill using " << snapshot.model_name << ".";
       else
-        text << "No model is active; audio is passing through.";
+        text << "\nNo model is active. Audio is passing through unprocessed.";
     } else if (!snapshot.has_model) {
       result.severity = StatusSeverity::Error;
-      text << "No model is active. Audio is passing through.";
+      text << "No model is active. Audio is passing through unprocessed.";
     } else {
       if (snapshot.consecutive_failures) {
         result.severity = StatusSeverity::Warning;
-        text << "The last processing attempt failed and will be retried. ";
+        text << "The last processing attempt failed and will be retried.";
         if (!snapshot.last_error.empty())
-          text << "Last error: " << snapshot.last_error << ". ";
+          text << " Last error: " << snapshot.last_error << ".";
+        text << "\n";
       }
       if (snapshot.bypass) {
         result.severity = StatusSeverity::Warning;
-        text << "Bypass is active with latency-aligned dry audio. Processing "
-                "remains warm. ";
+        text << "Bypass is on. Delay-matched original audio is passing "
+                "through and the model stays warm.\n";
       }
       text << "Active: ";
       if (paths_equivalent_for_status(snapshot.model_path,
                                       quality_model_path()))
-        text << "DPDFNet8 (best quality). ";
+        text << "DPDFNet8";
       else if (paths_equivalent_for_status(snapshot.model_path,
                                            low_cpu_model_path()))
-        text << "DPDFNet2 (lower CPU). ";
+        text << "DPDFNet2";
       else
-        text << snapshot.model_name << " (custom). ";
+        text << snapshot.model_name << " (custom)";
       if (snapshot.resampling) {
-        text << "OBS " << snapshot.sample_rate << " Hz <-> model "
-             << snapshot.model_rate << " Hz. ";
+        text << ", OBS " << khz(snapshot.sample_rate) << " kHz resampled to "
+             << khz(snapshot.model_rate) << " kHz";
       } else {
-        text << snapshot.model_rate << " Hz native. ";
+        text << ", " << khz(snapshot.model_rate) << " kHz native";
       }
       const double frame_ms = snapshot.model_rate
                                   ? snapshot.n_fft * 1000.0 /
@@ -795,34 +803,31 @@ public:
                                 ? snapshot.hop_size * 1000.0 /
                                       static_cast<double>(snapshot.model_rate)
                                 : 0.0;
-      text << frame_ms << " ms frame / " << hop_ms << " ms hop.";
+      text << ", " << frame_ms << " ms frame / " << hop_ms << " ms hop";
     }
 
     if (snapshot.oversized_packets) {
       if (result.severity == StatusSeverity::Normal)
         result.severity = StatusSeverity::Warning;
-      text << " Since the last processing reset, " << snapshot.oversized_packets
-           << " incoming audio "
-           << (snapshot.oversized_packets == 1 ? "packet exceeded"
-                                               : "packets exceeded")
-           << " the " << DPDFNET_MAX_REALTIME_PACKET_FRAMES
-           << "-frame realtime limit and passed through.";
+      text << "\n"
+           << snapshot.oversized_packets << " audio "
+           << (snapshot.oversized_packets == 1 ? "packet" : "packets")
+           << " over the " << DPDFNET_MAX_REALTIME_PACKET_FRAMES
+           << "-frame realtime limit passed through since the last reset.";
     }
     if (snapshot.capacity_failures) {
       result.severity = StatusSeverity::Error;
-      text << " The realtime buffer capacity invariant failed "
-           << snapshot.capacity_failures << " "
-           << (snapshot.capacity_failures == 1 ? "time" : "times")
+      text << "\nRealtime buffer capacity failed " << snapshot.capacity_failures
+           << " " << (snapshot.capacity_failures == 1 ? "time" : "times")
            << "; affected audio passed through.";
     }
     if (snapshot.capacity_recovery_pending)
-      text << " Pipeline recovery is pending.";
+      text << "\nRecovery is pending.";
 
     if (timing.callbacks) {
-      text << " Active-processing epoch callback p99 <= "
-           << timing.total_p99_ns / 1000 << " us, max "
-           << timing.total_max_ns / 1000 << " us, deadline misses "
-           << timing.missed_deadlines << "/" << timing.callbacks << ".";
+      text << "\nCallback p99 under " << ms(timing.total_p99_ns) << " ms, max "
+           << ms(timing.total_max_ns) << " ms, " << timing.missed_deadlines
+           << " of " << timing.callbacks << " callbacks missed the deadline";
     }
 
     if (snapshot.processing_disabled &&
@@ -832,10 +837,11 @@ public:
           "currently passing through unprocessed.";
     } else if (snapshot.processing_disabled || rate_mismatch ||
                !snapshot.has_model) {
-      result.summary = "Processing is unavailable. Audio is passing through.";
+      result.summary =
+          "Processing is unavailable. Audio is passing through unprocessed.";
     } else if (!load_error.empty()) {
       result.summary =
-          "The selected model could not be loaded. The previous model remains "
+          "The selected model failed to load. The previous model is still "
           "active.";
     } else if (snapshot.capacity_failures) {
       result.summary =
@@ -848,7 +854,7 @@ public:
     } else if (snapshot.consecutive_failures) {
       result.summary = "Processing is active after a recent error.";
     } else if (snapshot.bypass) {
-      result.summary = "Bypass is active. Audio is not being enhanced.";
+      result.summary = "Bypass is on. Audio is not being enhanced.";
     } else {
       result.summary = "Processing normally.";
     }

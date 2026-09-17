@@ -2,59 +2,81 @@
 
 Native OBS audio filter for local DPDFNet speech enhancement.
 
-`obs-dpdfnet` loads a streaming DPDFNet ONNX model, processes 10 ms mono voice
-frames with ONNX Runtime, and returns the enhanced signal as a regular OBS
-audio filter. It is tuned for a close dynamic microphone in a 48 kHz OBS setup.
+The plugin runs a streaming DPDFNet ONNX model with ONNX Runtime on the CPU,
+enhances the selected mono channel in 10 ms hops, and returns the result as a
+regular OBS audio filter. It is tuned for a close dynamic microphone at 48 kHz.
+Everything runs locally; the plugin makes no network requests.
 
-Audio processing runs locally. The plugin does not make network requests at
-runtime.
-
-## Status
-
-This is the `1.0.1` release. Windows x64 is the primary tested path, including
-the direct MSVC helper scripts in `scripts/`.
-
-Current filter:
-
-- OBS filter name: `DPDFNet Noise Suppression`
-- Default model: `models/dpdfnet8_48khz_hr.onnx`
-- Model input: streaming DPDFNet ONNX with metadata-backed state initialization
-- Audio path: one selected mono input, blended back to the source channels
-- Controls: model preset or custom model, input channel, suppression limit, wet
-  mix, output gain, latency-aligned bypass, retry/reset processing, diagnostics
+Windows x64 is the tested platform.
 
 ## Install A Release Build
 
-Requirements:
+Requirements: Windows 10/11 64-bit and OBS Studio x64.
 
-- Windows 10/11 64-bit
-- OBS Studio x64
+Download the zip and its `.sha256` file from
+[GitHub releases](https://github.com/orienw/obs-dpdfnet/releases). The binary
+is unsigned, so SmartScreen or Defender may warn on download or first load.
 
-The release binary is unsigned. Windows SmartScreen or Defender may warn when
-it is downloaded or first loaded by OBS.
-
-Download the Windows x64 zip and `.sha256` file from the
-[GitHub releases](https://github.com/orienw/obs-dpdfnet/releases) page.
-
-To install:
-
-1. Close OBS Studio.
-2. Extract `obs-dpdfnet-<version>-windows-x64.zip`.
-3. Copy the extracted `obs-dpdfnet` folder into
+1. Close OBS.
+2. Extract the zip and copy the `obs-dpdfnet` folder into
    `%ProgramData%\obs-studio\plugins\`.
-4. Confirm this file exists:
+3. Check that
    `%ProgramData%\obs-studio\plugins\obs-dpdfnet\bin\64bit\obs-dpdfnet.dll`
-5. Start OBS, then add the filter:
+   exists.
+4. Start OBS and add the filter:
    `Audio Mixer -> mic gear -> Filters -> + -> DPDFNet Noise Suppression`
 
-Optional checksum verification from PowerShell:
+To verify the download, the two hashes must match:
 
 ```powershell
 Get-FileHash .\obs-dpdfnet-<version>-windows-x64.zip -Algorithm SHA256
 Get-Content .\obs-dpdfnet-<version>-windows-x64.zip.sha256
 ```
 
-The two SHA-256 values must match exactly.
+## Settings
+
+Start with:
+
+- `Model`: `DPDFNet8 (best quality, more CPU)`
+- `Input channel`: `Input 1 / left`
+- `Suppression limit`: `24-30 dB`
+- `Wet mix`: `100%`
+- `Output gain`: `0 dB`
+- OBS sample rate: `48 kHz` (the bundled models run natively, no resampling)
+
+Raise the suppression limit only if room noise is still obvious while you
+speak. `40 dB` is aggressive; `60 dB` is a diagnostic extreme.
+
+Use the filter on a microphone, not on desktop audio or music. It enhances one
+channel: on stereo sources pick the mic channel, or `Mix all channels` if you
+really want the average. Other OBS sample rates work; the voice lane is
+resampled to and from the model's 48 kHz.
+
+`DPDFNet8` sounds best but costs more CPU. If the machine cannot keep up for
+long, or processing fails repeatedly, the filter turns processing off, passes
+audio through unprocessed, and says so in the status line. Switch to
+`DPDFNet2` or lower system load, then press `Reset processing`.
+
+`Bypass` passes the original audio, delay-matched to the processed path, and
+keeps the model warm for A/B comparison. Disable the filter in OBS to stop its
+CPU use.
+
+The bundled models add 40 ms of internal delay. The filter aligns the dry mix,
+bypass, and timestamps to that delay so every output describes the same input
+audio.
+
+Custom ONNX models must expose the DPDFNet two-input, two-output float32 tensor
+contract and declare integer `output_delay_hops` metadata from 0 to 16: the
+model's spectral output delay, excluding STFT buffering and resampling. Models
+that fail the contract or produce non-finite warm-up output are rejected and
+the active model stays loaded.
+
+The `Diagnostics` group shows the active model, native or resampled operation,
+frame and hop sizes, and callback timing for the current run. Timing restarts
+on model, format, resampler, and reset changes; passthrough callbacks are not
+counted. Oversized-packet and buffer-capacity counts persist until a reset or
+model change. These are processing measurements, not end-to-end microphone
+latency. Press `Refresh` to update them.
 
 ## Build From Source On Windows
 
@@ -67,177 +89,75 @@ From PowerShell in this directory:
 .\scripts\install-windows.ps1 -BuildDir .\build\msvc
 ```
 
-Restart OBS, then add the filter here:
-
-`Audio Mixer -> mic gear -> Filters -> + -> DPDFNet Noise Suppression`
-
-The helper scripts download third-party build inputs into `third_party/`, build
-outputs into `build/`, and install the plugin under OBS's per-machine plugin
-folder:
-
-`%ProgramData%\obs-studio\plugins\obs-dpdfnet`
-
-## Recommended Settings
-
-For preserving an RE20-style close dynamic mic sound, start with:
-
-- `Input channel`: `Input 1 / left`
-- `Model`: `Best quality (DPDFNet8)`
-- `Suppression limit`: `24-30 dB`
-- `Wet mix`: `100%`
-- `Output gain`: `0 dB`
-- OBS sample rate: `48 kHz` preferred (runs the model natively, no resampling)
-
-Raise the suppression limit only when the room noise is still obvious while
-speaking. `40 dB` is aggressive, and `60 dB` is mostly useful as a diagnostic or
-extreme setting.
-
-This is a single-channel speech enhancer. On stereo sources, choose the mic
-input channel explicitly or use `Mix all channels` only when that is really what
-you want. Use it on a microphone source, not on desktop audio or music.
-
-If OBS's audio sample rate differs from the loaded model's rate (the bundled
-models run at 48 kHz), the filter resamples the enhanced voice lane internally
-at both boundaries, so a 44.1 kHz OBS setup works out of the box. At 48 kHz the
-model runs natively with no resampling in the path.
-
-`Bypass (latency-aligned)` keeps the processing pipeline warm and returns its
-aligned dry lane. This prevents stale or reordered packets while comparing the
-processed and original signals. Disable the filter with OBS's filter toggle
-when the goal is to stop its CPU use completely.
-
-The bundled models have four hops (40 ms) of internal signal delay. The filter
-aligns the suppression blend to that delay and discards startup output so the
-enhanced signal, dry mix, bypass, and timestamps describe the same input audio.
-The quality benchmark also receives this aligned output. Its corrected scores
-should not be compared directly with reports from versions before 1.0.1.
-
-Output packets can combine or split input packets to drain ready audio without
-accumulating latency when packet sizes change. Sample order and source timestamp
-gaps are preserved, and each output remains within the 8192-frame realtime limit.
-
-Custom ONNX models must declare integer `output_delay_hops` metadata between
-0 and 16. Set it to the model's spectral output delay, excluding STFT buffering
-and resampling. The legacy DPDFNet version 1 `dpdfnet2_48khz_hr` profile used by
-both bundled models is recognized as four hops when that metadata is absent.
-Other models without a declared delay are rejected instead of mixing
-unaligned audio.
-
-The diagnostics row distinguishes the selected model from the model that is
-actually active, reports native or resampled operation, and shows the model's
-frame and hop sizes. It also reports callback timing for the current active
-processing epoch after audio has flowed. Model, format, resampler, and reset
-transitions start a new epoch, and fail-open passthrough callbacks are excluded.
-These figures are processing measurements, not an end-to-end microphone
-latency claim. Press `Update status and diagnostics` while the filter properties
-are open to refresh it. The row also retains oversized-packet and unexpected
-buffer-capacity counts until a processing reset or model replacement, so a
-fail-open discontinuity is not silent. Packets above the bounded 8,192-frame
-realtime limit pass through unchanged.
+The scripts download build inputs into `third_party/`, build into `build/`,
+and install into `%ProgramData%\obs-studio\plugins\obs-dpdfnet`. Restart OBS
+afterwards.
 
 ## CMake Build
 
-The PowerShell scripts above are the tested Windows release path. CMake is the
-manual source-build path for contributors, custom OBS development builds, and
-Linux/macOS experiments.
+CMake is the manual path for contributors, custom OBS builds, and Linux/macOS
+experiments. It needs CMake 3.24+, a C++17 compiler, OBS Studio development
+files with `libobsConfig.cmake`, and an ONNX Runtime package. KissFFT is
+fetched at configure time unless `DPDFNET_FETCH_KISSFFT` is off.
 
-Requirements:
-
-- OBS Studio development files with `libobsConfig.cmake`
-- CMake 3.24+
-- Visual Studio 2022 on Windows, or a C++17 compiler on Linux/macOS
-- ONNX Runtime C/C++ package
-- Network access during CMake configure, unless you provide KissFFT yourself
-
-The official OBS installer may not include the development CMake package. If
-CMake cannot find `libobs`, build against an OBS source/build tree or an OBS
-plugin development package.
-
-By default, CMake installs into OBS's source-build style layout:
-`obs-plugins/64bit` and `data/obs-plugins/obs-dpdfnet`. Override
-`DPDFNET_PLUGIN_DESTINATION` and `DPDFNET_DATA_DESTINATION` if your OBS package
-uses different paths. CMake also copies the ONNX Runtime shared libraries it
-finds next to built targets and installs them with the plugin; disable that with
-`-DDPDFNET_COPY_RUNTIME_DEPENDENCIES=OFF` or
-`-DDPDFNET_INSTALL_RUNTIME_DEPENDENCIES=OFF`.
-
-Example Windows configure:
+Windows:
 
 ```powershell
 .\scripts\bootstrap-windows.ps1
-
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -Dlibobs_DIR="C:\path\to\obs-studio\build_x64\libobs" `
   -DONNXRUNTIME_ROOT="$PWD\third_party\onnxruntime"
-
 cmake --build build --config Release
 .\scripts\install-windows.ps1 -BuildDir .\build
 ```
 
-Example Linux/macOS configure:
+Linux/macOS:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -Dlibobs_DIR="/path/to/obs-studio/build/libobs" \
   -DONNXRUNTIME_ROOT="/path/to/onnxruntime"
-
 cmake --build build
 cmake --install build --prefix "/path/to/obs-prefix"
 ```
 
-Optional standalone model smoke test:
+The install layout defaults to `obs-plugins/64bit` and
+`data/obs-plugins/obs-dpdfnet`; override `DPDFNET_PLUGIN_DESTINATION` and
+`DPDFNET_DATA_DESTINATION` for other packages. ONNX Runtime shared libraries
+are copied next to built targets and installed with the plugin unless
+`DPDFNET_COPY_RUNTIME_DEPENDENCIES` or `DPDFNET_INSTALL_RUNTIME_DEPENDENCIES`
+is off.
 
-```powershell
-cmake -S . -B build-smoke -G "Visual Studio 17 2022" -A x64 `
-  -DDPDFNET_BUILD_MODEL_SMOKE=ON `
-  -Dlibobs_DIR="C:\path\to\obs-studio\build_x64\libobs" `
-  -DONNXRUNTIME_ROOT="$PWD\third_party\onnxruntime"
-
-cmake --build build-smoke --config Release --target dpdfnet-model-smoke
-.\build-smoke\Release\dpdfnet-model-smoke.exe .\models\dpdfnet8_48khz_hr.onnx
-```
-
-Set `DPDFNET_BUILD_TESTS=ON` to register the deterministic processor, model
-contract, and real-libobs filter lifecycle tests with CTest. The other optional
-tool targets are controlled by `DPDFNET_BUILD_STREAM_DUMP`,
-`DPDFNET_BUILD_QUALITY_BENCHMARK`, and `DPDFNET_BUILD_PROCESSOR_BENCHMARK`.
+`DPDFNET_BUILD_TESTS` registers the processor, model contract, and libobs
+filter lifecycle tests with CTest. `DPDFNET_BUILD_MODEL_SMOKE`,
+`DPDFNET_BUILD_STREAM_DUMP`, `DPDFNET_BUILD_PROCESSOR_BENCHMARK`, and
+`DPDFNET_BUILD_QUALITY_BENCHMARK` build the standalone tools.
 
 ## Tests And Benchmarks
 
-The direct Windows build produces the plugin, both model checks, the processor
-suite, and the benchmark tools. Run the authoritative local gate with:
+The Windows gate builds the plugin and tools and runs every test:
 
 ```powershell
 .\scripts\build-windows-msvc.ps1
 .\scripts\test-windows.ps1
 ```
 
-The suite covers both bundled models, malformed ONNX contracts, variable OBS
-packet sizes, channel and timestamp resets, aligned bypass transitions,
-44.1 and 96 kHz resampling, format transitions, resampled failure recovery,
-deterministic signal-integrity cases, and the runtime failure circuit breaker.
-Its real-libobs gate also checks filter lifecycle overlap, returned-buffer
-lifetime, plugin-owned callback allocations, and synchronous callback logging.
-The release script runs this gate before staging, including when `-SkipBuild`
-is used, and requires hash-bound build metadata for the source revision,
-versions, runtime dependencies, and tested artifacts.
+It covers both bundled models, malformed model contracts, variable packet
+sizes, resampling, bypass transitions, the failure circuit breakers, and the
+filter lifecycle against real libobs.
 
-Measure processor timing for both models at 44.1, 48, and 96 kHz with:
+Processor timing for both models at 44.1, 48, and 96 kHz:
 
 ```powershell
 .\scripts\benchmark-windows.ps1
 ```
 
-The report is written to `build\processor-benchmark.txt`. Live OBS callback
-timing, including lock wait, is accumulated by the filter and displayed in its
-diagnostics row. Use a Windows heap or ETW trace when validating allocations in
-ONNX Runtime and OBS themselves; plugin-owned buffer-capacity checks cannot see
-allocations inside those libraries.
+The report lands in `build\processor-benchmark.txt`. Live callback timing is
+shown in the filter's diagnostics.
 
-The automated signal tests detect numerical and stream-integrity regressions,
-but they do not claim to measure perceived speech quality. For a real-corpus
-comparison, commit and rebuild a clean source tree, put local mono 48 kHz PCM16
-or float32 clean-speech and noise WAVs under `build\quality-corpus\`, then run:
+The automated tests catch numerical and stream regressions; they do not
+measure perceived quality. For that, build from a clean committed tree, put
+mono 48 kHz clean-speech and noise WAVs under `build\quality-corpus\`, and run:
 
 ```powershell
 .\scripts\quality-benchmark-windows.ps1 `
@@ -246,93 +166,53 @@ or float32 clean-speech and noise WAVs under `build\quality-corpus\`, then run:
   -NoiseWav .\build\quality-corpus\fan.wav
 ```
 
-The case name creates a separate result directory and existing evidence is not
-overwritten unless `-Overwrite` is explicit. The ignored
-`build\quality-results\` directory receives the exact scaled clean and noise
-references, mixture and enhanced listening WAVs, and a report containing build,
-runtime, executable, input, and model provenance plus the mixing scales,
-settings, packet pattern, SI-SDR signals, clean-speech level change, noise
-attenuation, peak, clipping, non-finite, and DC measurements. Compare each model
-only with a baseline made from the same corpus and listen to every changed case
-for pumping, musical noise, coloration, and speech transitions before accepting
-it.
+Results go to `build\quality-results\` per case, with listening WAVs and a
+report of SI-SDR, noise attenuation, level, clipping, and provenance. Existing
+results are kept unless you pass `-Overwrite`. Compare against a baseline from
+the same corpus and listen before trusting a number.
 
 ## Models
 
-The `models/` directory contains DPDFNet ONNX artifacts from
-`Ceva-IP/DPDFNet`. `models/manifest.json` records the source revision, file
-names, sizes, and SHA-256 hashes.
+`models/` holds the DPDFNet ONNX files from `Ceva-IP/DPDFNet`;
+`models/manifest.json` records the source revision and SHA-256 hashes.
 
-The release includes two 48 kHz models:
+- `dpdfnet8_48khz_hr.onnx`: default, best quality, more CPU.
+- `dpdfnet2_48khz_hr.onnx`: lighter alternative.
 
-- `dpdfnet8_48khz_hr.onnx` is the default, higher-capacity model.
-- `dpdfnet2_48khz_hr.onnx` is the lighter alternative when lower CPU use is
-  more important.
-
-Choose `Best quality (DPDFNet8)`, `Lower CPU (DPDFNet2)`, or `Custom ONNX
-model` in the filter properties. Existing scenes that stored a model path are
-migrated without discarding custom or missing paths. Custom models must expose
-the exact two-input, two-output float32 DPDFNet tensor contract described by
-their metadata. Contract violations and non-finite warm-up output are rejected
-before activation. Non-finite runtime output fails open and trips the circuit
-breaker after repeated errors. Processing time is also compared with the amount
-of model audio completed. Sustained overload opens a separate realtime circuit
-and passes audio through until processing is reset or the model is replaced;
-choose the lower-CPU model or a faster custom model if it repeats.
-
-To refresh the pinned ONNX Runtime and DPDFNet model artifacts with hash checks:
+To refresh the pinned ONNX Runtime and model files with hash checks, optionally
+rebuilding and installing:
 
 ```powershell
 .\scripts\update-windows.ps1
-```
-
-To probe a newer ONNX Runtime release, pass `-OnnxRuntimeVersion latest`.
-
-To refresh, rebuild, and install:
-
-```powershell
 .\scripts\update-windows.ps1 -Build -Install
 ```
 
+Pass `-OnnxRuntimeVersion latest` to try a newer ONNX Runtime.
+
 ## Release Workflow
 
-The Windows release flow is split in two: Windows PowerShell builds and stages
-the Windows artifact, then WSL or Linux publishes the GitHub tag and release
-with the GitHub auth configured for this checkout.
-
-From Windows PowerShell:
+Windows PowerShell builds, tests, and stages the artifact; WSL or Linux
+publishes the tag and GitHub release.
 
 ```powershell
-.\scripts\release-windows.ps1 -Version 1.0.1 `
-  -Changelog @(
-    "Aligned suppression, dry/wet mixing, bypass, and timestamps with model output."
-    "Fixed audio backlog and drops when input packet sizes change."
-    "Fixed ONNX Runtime loading from CMake Linux installs."
-  )
+.\scripts\release-windows.ps1 -Version <version> -Changelog @(
+  "First change."
+  "Second change."
+)
 ```
 
-The script rebuilds unless `-SkipBuild` is supplied, runs the mandatory Windows
-test gate either way, verifies clean source and test provenance, then writes the
-zip, checksum, and release notes under `build/`.
-
-The Windows CI also stages a `windows-release` artifact for successful pushes to
-`main`, using the same script and mandatory test gate. It contains the zip,
-checksum, notes, commit stamp, and test report. Download it into `build/` in a
-clean checkout of that commit, review the notes, and publish with the command
-below. CI packages the candidate; publication remains a separate step.
-
-For a portable OBS installation, pass `-ObsInstallDir` to the staging script.
-
-From WSL:
+The script rebuilds unless `-SkipBuild` is passed, always runs the test gate,
+checks that the source tree is clean, and writes the zip, checksum, and notes
+under `build/`. Pass `-ObsInstallDir` for a portable OBS install. CI stages the
+same `windows-release` artifact for every push to `main`; download it into
+`build/` in a clean checkout of that commit to publish it.
 
 ```bash
-./scripts/publish-release-wsl.sh 1.0.1
+./scripts/publish-release-wsl.sh <version> [--draft]
 ```
-
-For a draft release, add `--draft` to the WSL publish command.
 
 ## License
 
-The plugin source code is licensed under GPL-2.0-or-later. The bundled DPDFNet
-model artifacts and downloaded build/runtime dependencies keep their upstream
-licenses. See `LICENSE`, `THIRD_PARTY.md`, and `LICENSES/`.
+GPL-2.0-or-later for the plugin source. The bundled models and downloaded
+dependencies keep their upstream licenses; see `LICENSE`, `THIRD_PARTY.md`, and
+`LICENSES/`.
