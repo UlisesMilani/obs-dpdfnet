@@ -150,6 +150,43 @@ void test_realtime_budget_guard() {
                     std::numeric_limits<int>::max(), 1);
   require(saturated.budget_ns == UINT64_MAX && !saturated.tripped,
           "realtime budget arithmetic did not saturate safely");
+
+  guard.reset();
+  guard.set_probe(true);
+  require(guard.probe(), "probe mode was not retained");
+  for (size_t hop = 1; hop <= 10; ++hop)
+    require(guard.observe(2 * hop_budget, 1, 480, 48000).tripped == (hop == 10),
+            "probe mode did not trip 2x realtime load at the tight point");
+  guard.reset();
+  require(guard.probe(), "guard reset cleared probe mode");
+  for (size_t hop = 1; hop <= 100; ++hop)
+    require(guard.observe(hop_budget + 1'000'000, 1, 480, 48000).tripped ==
+                (hop == 100),
+            "probe mode did not trip 10 percent overload at the tight point");
+  guard.set_probe(false);
+  guard.reset();
+  for (size_t hop = 1; hop <= 10; ++hop)
+    require(!guard.observe(2 * hop_budget, 1, 480, 48000).tripped,
+            "leaving probe mode did not restore the relaxed thresholds");
+}
+
+void test_overload_retry_schedule() {
+  DpdfnetOverloadRetrySchedule schedule;
+  require(schedule.attempts() == 0, "fresh retry schedule reported attempts");
+  require(schedule.next_delay_ns() == 10'000'000'000ULL,
+          "first retry was not scheduled after 10 s");
+  require(schedule.next_delay_ns() == 30'000'000'000ULL,
+          "second retry was not scheduled after 30 s");
+  require(schedule.next_delay_ns() == 60'000'000'000ULL,
+          "third retry was not scheduled after 60 s");
+  require(schedule.attempts() == DpdfnetOverloadRetrySchedule::MAX_ATTEMPTS,
+          "retry schedule miscounted attempts");
+  require(schedule.next_delay_ns() == 0 && schedule.next_delay_ns() == 0,
+          "exhausted retry schedule kept retrying");
+  schedule.reset();
+  require(schedule.attempts() == 0 &&
+              schedule.next_delay_ns() == 10'000'000'000ULL,
+          "retry schedule did not restart after reset");
 }
 
 void test_process_result_fail_open() {
@@ -1150,6 +1187,8 @@ int main(int argc, char **argv) {
   passed = run_test("ring", test_ring) && passed;
   passed =
       run_test("realtime budget guard", test_realtime_budget_guard) && passed;
+  passed = run_test("overload retry schedule", test_overload_retry_schedule) &&
+           passed;
   passed =
       run_test("process result fail open", test_process_result_fail_open) &&
       passed;

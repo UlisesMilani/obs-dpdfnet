@@ -53,10 +53,11 @@ channel: on stereo sources pick the mic channel, or `Mix all channels` if you
 really want the average. Other OBS sample rates work; the voice lane is
 resampled to and from the model's 48 kHz.
 
-`DPDFNet8` sounds best but costs more CPU. If the machine cannot keep up for
-long, or processing fails repeatedly, the filter turns processing off, passes
-audio through unprocessed, and says so in the status line. Switch to
-`DPDFNet2` or lower system load, then press `Reset processing`.
+`DPDFNet8` sounds best but costs more CPU. If the machine cannot keep up, the
+filter pauses processing, passes audio through unprocessed, says so in the
+status line, and retries after 10, 30, and 60 seconds. If it still cannot keep
+up after that, or processing fails repeatedly, processing stays off until you
+press `Reset processing`. Switch to `DPDFNet2` or lower system load first.
 
 `Bypass` passes the original audio, delay-matched to the processed path, and
 keeps the model warm for A/B comparison. Disable the filter in OBS to stop its

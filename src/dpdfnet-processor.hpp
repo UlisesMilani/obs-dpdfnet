@@ -126,6 +126,7 @@ enum class DpdfnetEvent {
   OversizedPacket,
   CapacityInvariantFailure,
   RealtimeOverloadCircuitOpened,
+  RealtimeOverloadRecovered,
   Count
 };
 

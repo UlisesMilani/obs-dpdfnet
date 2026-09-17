@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -30,6 +31,10 @@ constexpr const char *SETTING_BYPASS = "bypass";
 
 constexpr const char *QUALITY_MODEL_FILE = "models/dpdfnet8_48khz_hr.onnx";
 constexpr const char *LOW_CPU_MODEL_FILE = "models/dpdfnet2_48khz_hr.onnx";
+
+// Audio an automatic retry must process on probe thresholds before the
+// guard relaxes again and the retry schedule starts over.
+constexpr uint64_t OVERLOAD_PROBE_AUDIO_NS = 10'000'000'000ULL;
 
 std::string module_file(const char *relative_path) {
   char *path = obs_module_file(relative_path);
@@ -366,6 +371,9 @@ public:
       if (replacing_model && new_model.model) {
         old_model = processor_.replace_model(std::move(new_model));
         model_loaded = true;
+        overload_retries_.reset();
+        realtime_guard_.set_probe(false);
+        probe_audio_ns_ = 0;
         active_model_path_.swap(prepared_active_path);
         have_failed_model_path_ = false;
         failed_model_path_.swap(discarded_failed_path);
@@ -513,6 +521,7 @@ public:
     const uint64_t processor_finished = os_gettime_ns();
     const bool active_processing_result =
         result.disposition != DpdfnetDisposition::Passthrough;
+    uint64_t overload_retry_delay_ns = 0;
 
     if (timing_eligible && active_processing_result) {
       const DpdfnetRealtimeObservation observation = realtime_guard_.observe(
@@ -530,6 +539,15 @@ public:
         if (processor_.disable_for_realtime_overload(result.message.data())) {
           result.fail_open();
           result.event = DpdfnetEvent::RealtimeOverloadCircuitOpened;
+          overload_retry_delay_ns = overload_retries_.next_delay_ns();
+        }
+      } else if (realtime_guard_.probe() &&
+                 result.event == DpdfnetEvent::None) {
+        probe_audio_ns_ += observation.budget_ns;
+        if (probe_audio_ns_ >= OVERLOAD_PROBE_AUDIO_NS) {
+          realtime_guard_.set_probe(false);
+          overload_retries_.reset();
+          result.event = DpdfnetEvent::RealtimeOverloadRecovered;
         }
       }
     }
@@ -573,17 +591,28 @@ public:
     lock.unlock();
 
     request_worker(format_resampler_refresh || result.resampler_refresh_needed,
-                   result);
+                   result, overload_retry_delay_ns);
     return output;
   }
 
-  void reset_state() {
+  void reset_state() { reset_processing(false); }
+
+  // Shared by the Reset button and the automatic retry after a realtime
+  // overload. A retry only acts while processing is still paused for that
+  // reason, resumes on probe thresholds, and keeps the retry count.
+  bool reset_processing(bool automatic_retry) {
+    size_t attempt = 0;
     {
       std::lock_guard<std::mutex> update_lock(update_mutex_);
       DpdfnetProcessorState state;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         state = processor_.state();
+        if (automatic_retry &&
+            (!state.processing_disabled ||
+             state.disable_reason != DpdfnetDisableReason::RealtimeOverload))
+          return false;
+        attempt = overload_retries_.attempts();
       }
 
       DpdfnetResamplers fresh;
@@ -622,15 +651,30 @@ public:
           last_resampler_error_.swap(prepared_resampler_error);
         processor_.reset_state();
         reset_timing_epoch();
+        realtime_guard_.set_probe(automatic_retry);
+        probe_audio_ns_ = 0;
+        if (!automatic_retry)
+          overload_retries_.reset();
         have_failed_model_path_ = false;
         failed_model_path_.swap(discarded_failed_path);
         last_load_error_.swap(discarded_load_error);
       }
     }
+    {
+      std::lock_guard<std::mutex> lock(resampler_request_mutex_);
+      overload_retry_deadline_ns_ = 0;
+    }
+    if (automatic_retry) {
+      blog(LOG_INFO,
+           "[obs-dpdfnet] retrying processing after realtime overload "
+           "(attempt %zu of %zu)",
+           attempt, DpdfnetOverloadRetrySchedule::MAX_ATTEMPTS);
+    }
 
     obs_data_t *settings = obs_source_get_settings(source_);
     update(settings);
     obs_data_release(settings);
+    return true;
   }
 
   void reset_stream_boundary() {
@@ -711,6 +755,16 @@ public:
     }
     const std::string load_error = last_load_error_;
     const std::string resampler_error = last_resampler_error_;
+    uint64_t retry_in_ns = 0;
+    {
+      std::lock_guard<std::mutex> lock(resampler_request_mutex_);
+      if (overload_retry_deadline_ns_) {
+        const uint64_t now = os_gettime_ns();
+        retry_in_ns = overload_retry_deadline_ns_ > now
+                          ? overload_retry_deadline_ns_ - now
+                          : 1;
+      }
+    }
 
     std::ostringstream text;
     FilterStatus result;
@@ -727,9 +781,16 @@ public:
     if (snapshot.processing_disabled &&
         snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload) {
       result.severity = StatusSeverity::Error;
-      text << "Processing is disabled after sustained realtime overload. Audio "
-              "is passing through unprocessed. Switch to DPDFNet2 or reduce "
-              "system load, then press Reset processing.";
+      if (retry_in_ns) {
+        text << "Processing is paused after sustained realtime overload. "
+                "Audio is passing through unprocessed. Processing retries in "
+             << (retry_in_ns + 999'999'999) / 1'000'000'000
+             << " s. Switch to DPDFNet2 or reduce system load.";
+      } else {
+        text << "Processing is disabled after repeated realtime overload. "
+                "Audio is passing through unprocessed. Switch to DPDFNet2 or "
+                "reduce system load, then press Reset processing.";
+      }
       if (!snapshot.last_error.empty())
         text << "\nLast overload: " << snapshot.last_error << ".";
       if (!load_error.empty())
@@ -833,8 +894,11 @@ public:
     if (snapshot.processing_disabled &&
         snapshot.disable_reason == DpdfnetDisableReason::RealtimeOverload) {
       result.summary =
-          "Processing is disabled after sustained realtime overload. Audio is "
-          "currently passing through unprocessed.";
+          retry_in_ns ? "Processing is paused after realtime overload and will "
+                        "retry. Audio is currently passing through unprocessed."
+                      : "Processing is disabled after repeated realtime "
+                        "overload. Audio is currently passing through "
+                        "unprocessed.";
     } else if (snapshot.processing_disabled || rate_mismatch ||
                !snapshot.has_model) {
       result.summary =
@@ -876,6 +940,7 @@ private:
   struct CallbackDiagnostic {
     bool pending = false;
     DpdfnetEvent event = DpdfnetEvent::None;
+    uint64_t retry_delay_ns = 0;
     std::array<char, 256> message = {};
   };
 
@@ -885,7 +950,8 @@ private:
   }
 
   void request_worker(bool resampler_refresh,
-                      const DpdfnetProcessResult &result) {
+                      const DpdfnetProcessResult &result,
+                      uint64_t overload_retry_delay_ns) {
     if (!resampler_refresh && result.event == DpdfnetEvent::None)
       return;
 
@@ -897,8 +963,14 @@ private:
         if (index < callback_diagnostics_.size()) {
           callback_diagnostics_[index].pending = true;
           callback_diagnostics_[index].event = result.event;
+          callback_diagnostics_[index].retry_delay_ns = overload_retry_delay_ns;
           callback_diagnostics_[index].message = result.message;
         }
+      }
+      if (result.event == DpdfnetEvent::RealtimeOverloadCircuitOpened) {
+        overload_retry_deadline_ns_ =
+            overload_retry_delay_ns ? os_gettime_ns() + overload_retry_delay_ns
+                                    : 0;
       }
     }
     resampler_request_cv_.notify_one();
@@ -941,22 +1013,51 @@ private:
            diagnostic.message.data());
     } else if (diagnostic.event ==
                DpdfnetEvent::RealtimeOverloadCircuitOpened) {
-      blog(LOG_ERROR,
-           "[obs-dpdfnet] sustained realtime overload: %s; processing is "
-           "disabled and audio is passing through until processing is reset",
-           diagnostic.message.data());
+      if (diagnostic.retry_delay_ns) {
+        blog(LOG_ERROR,
+             "[obs-dpdfnet] sustained realtime overload: %s; processing is "
+             "paused and audio is passing through; retrying in %llu s",
+             diagnostic.message.data(),
+             static_cast<unsigned long long>(diagnostic.retry_delay_ns /
+                                             1'000'000'000ULL));
+      } else {
+        blog(LOG_ERROR,
+             "[obs-dpdfnet] sustained realtime overload: %s; automatic "
+             "retries are exhausted, processing is disabled and audio is "
+             "passing through until processing is reset",
+             diagnostic.message.data());
+      }
+    } else if (diagnostic.event == DpdfnetEvent::RealtimeOverloadRecovered) {
+      blog(LOG_INFO,
+           "[obs-dpdfnet] processing recovered after realtime overload");
     }
   }
 
   void resampler_worker_loop() {
     std::unique_lock<std::mutex> request_lock(resampler_request_mutex_);
+    const auto ready = [this] {
+      return stop_resampler_worker_ || resampler_refresh_requested_ ||
+             callback_diagnostic_pending();
+    };
     for (;;) {
-      resampler_request_cv_.wait(request_lock, [this] {
-        return stop_resampler_worker_ || resampler_refresh_requested_ ||
-               callback_diagnostic_pending();
-      });
+      if (overload_retry_deadline_ns_) {
+        const uint64_t now = os_gettime_ns();
+        if (now < overload_retry_deadline_ns_) {
+          resampler_request_cv_.wait_for(
+              request_lock,
+              std::chrono::nanoseconds(overload_retry_deadline_ns_ - now),
+              ready);
+        }
+      } else {
+        resampler_request_cv_.wait(request_lock, ready);
+      }
       if (stop_resampler_worker_)
         return;
+      const bool retry_overload =
+          overload_retry_deadline_ns_ &&
+          os_gettime_ns() >= overload_retry_deadline_ns_;
+      if (retry_overload)
+        overload_retry_deadline_ns_ = 0;
       const bool refresh_resamplers = resampler_refresh_requested_;
       resampler_refresh_requested_ = false;
       auto diagnostics = callback_diagnostics_;
@@ -969,6 +1070,8 @@ private:
       }
       if (refresh_resamplers)
         rebuild_resamplers_after_discontinuity();
+      if (retry_overload)
+        reset_processing(true);
       request_lock.lock();
     }
   }
@@ -1063,6 +1166,8 @@ private:
   DpdfnetControls controls_;
   CallbackTimings timings_;
   DpdfnetRealtimeBudgetGuard realtime_guard_;
+  DpdfnetOverloadRetrySchedule overload_retries_;
+  uint64_t probe_audio_ns_ = 0;
   bool custom_model_selected_ = false;
   std::string active_model_path_;
   bool have_failed_model_path_ = false;
@@ -1070,9 +1175,10 @@ private:
   std::string last_load_error_;
   std::string last_resampler_error_;
   struct obs_audio_data output_audio_ = {};
-  std::mutex resampler_request_mutex_;
+  mutable std::mutex resampler_request_mutex_;
   std::condition_variable resampler_request_cv_;
   bool resampler_refresh_requested_ = false;
+  uint64_t overload_retry_deadline_ns_ = 0;
   std::array<CallbackDiagnostic, static_cast<size_t>(DpdfnetEvent::Count) - 1>
       callback_diagnostics_ = {};
   bool stop_resampler_worker_ = false;
