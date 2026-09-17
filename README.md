@@ -7,7 +7,8 @@ enhances the selected mono channel in 10 ms hops, and returns the result as a
 regular OBS audio filter. It is tuned for a close dynamic microphone at 48 kHz.
 Everything runs locally; the plugin makes no network requests.
 
-Windows x64 is the tested platform.
+Tested on Windows x64 and Linux. Release builds are Windows only; Linux
+builds from source with CMake.
 
 ## Install A Release Build
 
@@ -95,8 +96,8 @@ afterwards.
 
 ## CMake Build
 
-CMake is the manual path for contributors, custom OBS builds, and Linux/macOS
-experiments. It needs CMake 3.24+, a C++17 compiler, OBS Studio development
+CMake is the manual path for contributors, custom OBS builds, Linux, and
+macOS. It needs CMake 3.24+, a C++17 compiler, OBS Studio development
 files with `libobsConfig.cmake`, and an ONNX Runtime package. KissFFT is
 fetched at configure time unless `DPDFNET_FETCH_KISSFFT` is off.
 
@@ -111,15 +112,19 @@ cmake --build build --config Release
 .\scripts\install-windows.ps1 -BuildDir .\build
 ```
 
-Linux/macOS:
+Linux/macOS, installing into the OBS user plugin folder:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -Dlibobs_DIR="/path/to/obs-studio/build/libobs" \
-  -DONNXRUNTIME_ROOT="/path/to/onnxruntime"
+  -Dlibobs_DIR=/usr/lib/cmake/libobs \
+  -DONNXRUNTIME_ROOT="/path/to/onnxruntime" \
+  -DDPDFNET_PLUGIN_DESTINATION=bin/64bit -DDPDFNET_DATA_DESTINATION=data
 cmake --build build
-cmake --install build --prefix "/path/to/obs-prefix"
+cmake --install build --prefix ~/.config/obs-studio/plugins/obs-dpdfnet
 ```
+
+Point `libobs_DIR` at an OBS build tree instead if your OBS package ships no
+CMake files. Restart OBS after installing.
 
 The install layout defaults to `obs-plugins/64bit` and
 `data/obs-plugins/obs-dpdfnet`; override `DPDFNET_PLUGIN_DESTINATION` and
