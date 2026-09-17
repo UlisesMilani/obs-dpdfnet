@@ -607,6 +607,23 @@ void test_direct_callbacks(const std::string &model_path) {
     require(reset && obs_property_button_clicked(reset, nullptr),
             "Reset button callback failed");
     verify_status_property(properties);
+
+    // OBS updates the source before running a property's modified callback.
+    obs_property_t *bypass = obs_properties_get(properties, "bypass");
+    obs_data_set_bool(settings, "bypass", true);
+    dpdfnet_filter_info.update(filter.get(), settings);
+    require(bypass && obs_property_modified(bypass, settings),
+            "bypass change did not request a status redraw");
+    const char *bypass_summary = obs_property_description(
+        obs_properties_get(properties, "status_summary"));
+    require(bypass_summary &&
+                std::string(bypass_summary).rfind("Bypass on.", 0) == 0,
+            "status did not follow the bypass change");
+    obs_data_set_bool(settings, "bypass", false);
+    dpdfnet_filter_info.update(filter.get(), settings);
+    require(obs_property_modified(bypass, settings),
+            "clearing bypass did not request a status redraw");
+    verify_status_property(properties);
   }
 
   obs_source_set_enabled(source, false);

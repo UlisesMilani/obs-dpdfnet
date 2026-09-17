@@ -1215,20 +1215,37 @@ obs_text_info_type status_info_type(StatusSeverity severity) {
   return OBS_TEXT_INFO_NORMAL;
 }
 
-void update_status_properties(obs_properties_t *props, void *data) {
+bool set_info_text(obs_property_t *property, const std::string &text,
+                   obs_text_info_type type) {
+  if (!property)
+    return false;
+  const char *current = obs_property_description(property);
+  if (current && text == current &&
+      obs_property_text_info_type(property) == type)
+    return false;
+  obs_property_set_description(property, text.c_str());
+  obs_property_text_set_info_type(property, type);
+  return true;
+}
+
+// Returns true when a text changed, so callers can ask OBS to redraw only then.
+bool update_status_properties(obs_properties_t *props, void *data) {
   if (!data)
-    return;
+    return false;
   const FilterStatus status = static_cast<DpdfnetFilter *>(data)->status();
-  obs_property_t *summary = obs_properties_get(props, "status_summary");
-  if (summary) {
-    obs_property_set_description(summary, status.summary.c_str());
-    obs_property_text_set_info_type(summary, status_info_type(status.severity));
-  }
-  obs_property_t *details = obs_properties_get(props, "status_info");
-  if (details) {
-    obs_property_set_description(details, status.text.c_str());
-    obs_property_text_set_info_type(details, OBS_TEXT_INFO_NORMAL);
-  }
+  bool changed =
+      set_info_text(obs_properties_get(props, "status_summary"), status.summary,
+                    status_info_type(status.severity));
+  changed |= set_info_text(obs_properties_get(props, "status_info"),
+                           status.text, OBS_TEXT_INFO_NORMAL);
+  return changed;
+}
+
+// OBS applies the setting to the source before calling this, so the status
+// already reflects the change.
+bool status_settings_modified(void *data, obs_properties_t *props,
+                              obs_property_t *, obs_data_t *) {
+  return update_status_properties(props, data);
 }
 
 bool reset_clicked(obs_properties_t *props, obs_property_t *, void *data) {
@@ -1244,12 +1261,13 @@ bool refresh_clicked(obs_properties_t *props, obs_property_t *, void *data) {
   return true;
 }
 
-bool model_selection_modified(void *, obs_properties_t *props, obs_property_t *,
-                              obs_data_t *settings) {
+bool model_selection_modified(void *data, obs_properties_t *props,
+                              obs_property_t *, obs_data_t *settings) {
   const char *value = obs_data_get_string(settings, SETTING_MODEL_SELECTION);
   obs_property_t *path = obs_properties_get(props, SETTING_MODEL_PATH);
   obs_property_set_visible(path,
                            value && std::string(value) == DPDFNET_MODEL_CUSTOM);
+  update_status_properties(props, data);
   return true;
 }
 
@@ -1315,6 +1333,8 @@ obs_properties_t *filter_properties(void *data) {
       processing, SETTING_MODEL_PATH, obs_module_text("DPDFNet.ModelPath"),
       OBS_PATH_FILE, "ONNX model (*.onnx);;All files (*.*)", nullptr);
   set_tooltip(model_path, "DPDFNet.ModelPath.Tooltip");
+  obs_property_set_modified_callback2(model_path, status_settings_modified,
+                                      data);
   obs_property_set_visible(model_path, custom_selected);
 
   obs_property_t *input_channel =
@@ -1328,6 +1348,8 @@ obs_properties_t *filter_properties(void *data) {
   obs_property_list_add_int(input_channel,
                             obs_module_text("DPDFNet.InputChannel.Mix"), -1);
   set_tooltip(input_channel, "DPDFNet.InputChannel.Tooltip");
+  obs_property_set_modified_callback2(input_channel, status_settings_modified,
+                                      data);
 
   obs_property_t *attenuation = obs_properties_add_float_slider(
       processing, SETTING_ATTENUATION_LIMIT_DB,
@@ -1350,6 +1372,7 @@ obs_properties_t *filter_properties(void *data) {
   obs_property_t *bypass = obs_properties_add_bool(
       processing, SETTING_BYPASS, obs_module_text("DPDFNet.Bypass"));
   set_tooltip(bypass, "DPDFNet.Bypass.Tooltip");
+  obs_property_set_modified_callback2(bypass, status_settings_modified, data);
 
   obs_properties_add_group(props, "processing_group",
                            obs_module_text("DPDFNet.Processing"),
