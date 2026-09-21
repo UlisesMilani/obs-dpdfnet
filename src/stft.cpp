@@ -41,6 +41,17 @@ StreamingStft::StreamingStft(int n_fft, int hop_size)
     throw std::runtime_error(
         "DPDFNet STFT requires a positive 50 percent overlap configuration");
 
+  // Match the normalization used by Ceva's DPDFNet reference pipeline:
+  // wnorm = 1 / (n_fft^2 / (2 * hop_size)).
+  // At 960/480 this is exactly 1/960. The model expects spectra scaled by
+  // wnorm and the reconstructed waveform must be divided by the same value.
+  const double wnorm =
+      1.0 / (static_cast<double>(n_fft_) * n_fft_ /
+             (2.0 * static_cast<double>(hop_size_)));
+  spectrum_scale_ = static_cast<float>(wnorm);
+  synthesis_scale_ = static_cast<float>(1.0 / wnorm) /
+                     static_cast<float>(n_fft_);
+
   forward_ = kiss_fftr_alloc(n_fft_, 0, nullptr, nullptr);
   inverse_ = kiss_fftr_alloc(n_fft_, 1, nullptr, nullptr);
 
@@ -50,7 +61,7 @@ StreamingStft::StreamingStft(int n_fft, int hop_size)
 
 StreamingStft::~StreamingStft() {
   kiss_fftr_free(forward_);
-  kiss_fftr_free(inverse_);
+  kiss_fftri_free(inverse_);
 }
 
 void StreamingStft::reset() {
@@ -66,22 +77,23 @@ void StreamingStft::analysis(const std::vector<float> &frame, float *spec) {
         frame[static_cast<size_t>(i)] * window_[static_cast<size_t>(i)];
 
   kiss_fftr(forward_, time_frame_.data(), reinterpret_cast<kiss_fft_cpx *>(spec));
+
+  for (size_t i = 0; i < static_cast<size_t>(freq_bins_) * 2; ++i)
+    spec[i] *= spectrum_scale_;
 }
 
 void StreamingStft::synthesis(const float *spec, std::vector<float> &hop) {
   kiss_fftri(inverse_, reinterpret_cast<const kiss_fft_cpx *>(spec),
              time_frame_.data());
 
-  const float scale = 1.0f / static_cast<float>(n_fft_);
   for (int i = 0; i < n_fft_; ++i) {
     time_frame_[static_cast<size_t>(i)] *=
-        scale * window_[static_cast<size_t>(i)];
+        synthesis_scale_ * window_[static_cast<size_t>(i)];
   }
 
   std::move(ola_buffer_.begin() + hop_size_, ola_buffer_.end(),
             ola_buffer_.begin());
-  std::fill(ola_buffer_.begin() + (n_fft_ - hop_size_), ola_buffer_.end(),
-            0.0f);
+  std::fill(ola_buffer_.begin() + (n_fft_ - hop_size_), ola_buffer_.end(), 0.0f);
 
   for (int i = 0; i < n_fft_; ++i)
     ola_buffer_[static_cast<size_t>(i)] += time_frame_[static_cast<size_t>(i)];
