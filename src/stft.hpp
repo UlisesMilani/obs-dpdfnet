@@ -8,11 +8,10 @@
 
 inline constexpr double kPi = 3.141592653589793238462643383279502884;
 
-// Streaming 50%-overlap STFT/ISTFT. analysis() writes the real/imaginary
-// spectrum straight into a caller-owned interleaved [r,i] buffer and
-// synthesis() reads one back, so the spectrum never gets copied into or out of
-// an intermediate: the buffers are the model's bound ONNX tensors. This relies
-// on kiss_fft_cpx being two contiguous floats (asserted in stft.cpp).
+// Streaming 50%-overlap STFT/ISTFT with the normalization expected by the
+// DPDFNet 48 kHz HR reference implementation. analysis() writes the normalized
+// real/imaginary spectrum directly into the model's input tensor, and
+// synthesis() applies the inverse normalization before overlap-add.
 class StreamingStft {
 public:
   StreamingStft(int n_fft, int hop_size);
@@ -35,6 +34,9 @@ private:
 
   kiss_fftr_cfg forward_ = nullptr;
   kiss_fftr_cfg inverse_ = nullptr;
+
+  float spectrum_scale_ = 1.0f;
+  float synthesis_scale_ = 1.0f;
 
   std::vector<float> window_;
   std::vector<float> time_frame_;
