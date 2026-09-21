@@ -61,7 +61,7 @@ StreamingStft::StreamingStft(int n_fft, int hop_size)
 
 StreamingStft::~StreamingStft() {
   kiss_fftr_free(forward_);
-  kiss_fftri_free(inverse_);
+  kiss_fftr_free(inverse_);
 }
 
 void StreamingStft::reset() {
